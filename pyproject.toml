@@ -8,6 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.11"
 dependencies = [
     "docker>=7.2,<8",
+    "kubernetes>=34,<35",
     "mcp[cli]>=2,<3",
     "psycopg[binary]>=3.1,<4",
     "python-dotenv>=1,<2",

@@ -5,13 +5,14 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import docker as docker_sdk
+from kubernetes.client.exceptions import ApiException
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
 import psycopg
 import pytest
 
 from opspilot.server import mcp
-from opspilot.tools import docker, postgres
+from opspilot.tools import docker, kubernetes, postgres
 
 
 def run(coroutine):
@@ -24,13 +25,16 @@ def run(coroutine):
 
 def assert_tools(tools):
     by_name = {tool.name: tool for tool in tools}
-    assert len(tools) == 7
+    assert len(tools) == 13
     assert set(by_name) == {
         "postgres_health", "postgres_list_tables", "postgres_query",
         "docker_health", "docker_list_containers", "docker_inspect_container",
         "docker_container_logs",
+        "kubernetes_health", "kubernetes_list_namespaces", "kubernetes_list_pods",
+        "kubernetes_inspect_pod", "kubernetes_pod_logs", "kubernetes_list_events",
     }
-    for name in ("postgres_health", "postgres_list_tables", "docker_health", "docker_list_containers"):
+    for name in ("postgres_health", "postgres_list_tables", "docker_health", "docker_list_containers",
+                 "kubernetes_health", "kubernetes_list_namespaces"):
         schema = by_name[name].input_schema
         assert schema["type"] == "object"
         assert schema["properties"] == {}
@@ -50,12 +54,33 @@ def assert_tools(tools):
     tail = by_name["docker_container_logs"].input_schema["properties"]["tail"]
     assert tail["type"] == "integer"
     assert tail["default"] == 100
+    for name in ("kubernetes_list_pods", "kubernetes_list_events"):
+        schema = by_name[name].input_schema
+        assert schema["type"] == "object"
+        assert set(schema["properties"]) == {"namespace"}
+        assert schema.get("required", []) == []
+        namespace = schema["properties"]["namespace"]
+        assert namespace["default"] is None
+        assert {option["type"] for option in namespace["anyOf"]} == {"string", "null"}
+    for name in ("kubernetes_inspect_pod", "kubernetes_pod_logs"):
+        schema = by_name[name].input_schema
+        assert schema["type"] == "object"
+        expected = {"name", "namespace", "tail"} if name == "kubernetes_pod_logs" else {"name", "namespace"}
+        assert set(schema["properties"]) == expected
+        assert schema["required"] == ["name"]
+        assert schema["properties"]["name"]["type"] == "string"
+        assert schema["properties"]["namespace"]["type"] == "string"
+        assert schema["properties"]["namespace"]["default"] == "default"
+    tail = by_name["kubernetes_pod_logs"].input_schema["properties"]["tail"]
+    assert tail["type"] == "integer"
+    assert tail["default"] == 100
 
 
 def test_discovery_without_database_configuration(monkeypatch):
     factory = MagicMock(side_effect=AssertionError("Discovery must not connect"))
     monkeypatch.setattr(postgres, "PostgresClient", factory)
     monkeypatch.setattr(docker, "DockerClient", factory)
+    monkeypatch.setattr(kubernetes, "KubernetesClient", factory)
 
     async def check():
         async with Client(mcp) as client:
@@ -233,3 +258,70 @@ def test_docker_exceptions_are_tool_errors(monkeypatch, name, arguments, method,
     if not construction_error:
         expected_args = ("missing", 100) if method == "container_logs" else tuple(arguments.values())
         getattr(factory.return_value, method).assert_called_once_with(*expected_args)
+
+
+@pytest.mark.parametrize("name,arguments,method,value,expected_args", [
+    ("kubernetes_health", {}, "health_check", True, ()),
+    ("kubernetes_health", {}, "health_check", False, ()),
+    ("kubernetes_list_namespaces", {}, "list_namespaces", ["default", "prod"], ()),
+    ("kubernetes_list_namespaces", {}, "list_namespaces", [], ()),
+    ("kubernetes_list_pods", {}, "list_pods", [{"name": "web", "namespace": "default", "node": None}], (None,)),
+    ("kubernetes_list_pods", {"namespace": None}, "list_pods", [], (None,)),
+    ("kubernetes_list_pods", {"namespace": "prod"}, "list_pods", [], ("prod",)),
+    ("kubernetes_inspect_pod", {"name": "web"}, "inspect_pod", {"name": "web", "namespace": "default"}, ("web", "default")),
+    ("kubernetes_inspect_pod", {"name": "web", "namespace": "prod"}, "inspect_pod", {"name": "web", "namespace": "prod"}, ("web", "prod")),
+    ("kubernetes_pod_logs", {"name": "web"}, "pod_logs", "ready café\n", ("web", "default", 100)),
+    ("kubernetes_pod_logs", {"name": "web", "namespace": "prod"}, "pod_logs", "ready\n", ("web", "prod", 100)),
+    ("kubernetes_pod_logs", {"name": "web", "tail": 25}, "pod_logs", "", ("web", "default", 25)),
+    ("kubernetes_pod_logs", {"name": "web", "namespace": "prod", "tail": 25}, "pod_logs", "ready\n", ("web", "prod", 25)),
+    ("kubernetes_list_events", {}, "list_events", [{"name": "web", "reason": "Started", "message": None}], (None,)),
+    ("kubernetes_list_events", {"namespace": None}, "list_events", [], (None,)),
+    ("kubernetes_list_events", {"namespace": "prod"}, "list_events", [], ("prod",)),
+])
+def test_kubernetes_delegation_and_results(monkeypatch, name, arguments, method, value, expected_args):
+    factory = MagicMock()
+    getattr(factory.return_value, method).return_value = value
+    monkeypatch.setattr(kubernetes, "KubernetesClient", factory)
+
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool(name, arguments)
+            assert not result.is_error
+            expected = value if name == "kubernetes_inspect_pod" else {"result": value}
+            assert result.structured_content == expected
+
+    run(check())
+    factory.assert_called_once_with()
+    getattr(factory.return_value, method).assert_called_once_with(*expected_args)
+    assert len(factory.return_value.method_calls) == 1
+
+
+@pytest.mark.parametrize("name,arguments,method,expected_args", [
+    ("kubernetes_health", {}, "health_check", ()),
+    ("kubernetes_list_namespaces", {}, "list_namespaces", ()),
+    ("kubernetes_list_pods", {}, "list_pods", (None,)),
+    ("kubernetes_inspect_pod", {"name": "missing"}, "inspect_pod", ("missing", "default")),
+    ("kubernetes_pod_logs", {"name": "missing"}, "pod_logs", ("missing", "default", 100)),
+    ("kubernetes_list_events", {}, "list_events", (None,)),
+])
+@pytest.mark.parametrize("construction_error", [False, True])
+def test_kubernetes_exceptions_are_tool_errors(monkeypatch, name, arguments, method, expected_args, construction_error):
+    factory = MagicMock()
+    error = ApiException(status=503, reason="Kubernetes unavailable")
+    if construction_error:
+        factory.side_effect = error
+    else:
+        getattr(factory.return_value, method).side_effect = error
+    monkeypatch.setattr(kubernetes, "KubernetesClient", factory)
+
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool(name, arguments)
+            assert result.is_error
+            assert f"Error executing tool {name}" in result.content[0].text
+
+    run(check())
+    factory.assert_called_once_with()
+    if not construction_error:
+        getattr(factory.return_value, method).assert_called_once_with(*expected_args)
+        assert len(factory.return_value.method_calls) == 1
