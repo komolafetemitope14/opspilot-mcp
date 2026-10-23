@@ -1,21 +1,32 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-
-# Virtual environment
-.venv/
-
-# Environment variables / secrets
+# Environment variables
 .env
 
-# Testing
+# Python virtual environments
+.venv/
+venv/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Test and coverage artifacts
 .pytest_cache/
 .coverage
+htmlcov/
 
-# IDE
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE and editor files
 .vscode/
 .idea/
 
-# OS
+# Vim temporary files
+*.swp
+*.swo
+
+# Operating system files
 .DS_Store
+Thumbs.db
