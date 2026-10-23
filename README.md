@@ -1,6 +1,6 @@
 # OpsPilot MCP
 
-OpsPilot MCP is a Python-based local infrastructure MCP server that allows AI assistants to inspect PostgreSQL through the Model Context Protocol (MCP). Docker inspection and Kubernetes integration are planned for later milestones.
+OpsPilot MCP is a Python-based local infrastructure MCP server that allows AI assistants to inspect PostgreSQL and Docker through the Model Context Protocol (MCP). Kubernetes integration remains planned for a later milestone.
 
 This README is a living project progress document, tracking implemented capabilities, verification results, and upcoming milestones.
 
@@ -17,7 +17,7 @@ Enable AI assistants to answer infrastructure questions such as:
 
 ## Architecture
 
-The MCP server and PostgreSQL tools are implemented. Docker inspection and Kubernetes integration are planned:
+The MCP server, PostgreSQL tools, and read-only Docker inspection tools are implemented. Kubernetes integration remains planned:
 
 ```text
 AI / MCP Client
@@ -27,7 +27,7 @@ AI / MCP Client
 OpsPilot MCP Server
        |
        +---- PostgreSQL (implemented)
-       +---- Docker (planned)
+       +---- Docker (implemented, read-only)
        +---- Kubernetes (planned)
 ```
 
@@ -59,13 +59,37 @@ The implemented MCP server exposes three PostgreSQL tools:
 
 Verification completed:
 
-- 38 pytest tests pass, covering PostgreSQL client behavior and MCP tools.
+- At Milestone 2 completion, 38 pytest tests passed, covering PostgreSQL client behavior and MCP tools.
 - MCP tool discovery was tested.
 - stdio MCP server/client communication was tested.
 - Manual end-to-end verification against the real PostgreSQL Docker container succeeded: `postgres_health` returned `true`, `postgres_list_tables` returned `["services"]`, and `postgres_query` returned the three existing service records.
 - A DELETE sent through `postgres_query` was rejected and returned an MCP tool error.
 
-Real-container verification was performed separately from the automated tests. Docker Compose currently provides the development database. Docker inspection tools and Kubernetes integrations are not yet implemented.
+**Milestone 3 — Docker Inspection Tools: COMPLETE**
+
+The implemented MCP server exposes four read-only Docker tools:
+
+- `docker_health` — checks communication with the Docker Engine.
+- `docker_list_containers` — lists running and stopped containers using curated JSON-friendly data.
+- `docker_inspect_container` — returns selected operational details, including status, health, running state, exit code, and ports.
+- `docker_container_logs` — returns a bounded number of recent container log lines.
+
+Docker operations are currently read-only. OpsPilot does not start, stop, restart, remove, or create containers.
+
+Verification completed:
+
+- 83 pytest tests pass across the PostgreSQL, Docker, and MCP functionality.
+- 23 DockerClient unit tests were added.
+- DockerClient was manually verified against the real Docker Desktop engine.
+- `docker_health` returned `true`.
+- Container listing found both running and exited containers.
+- Inspection of `opspilot-postgres` returned healthy/running state and port information.
+- Recent PostgreSQL container logs were retrieved successfully.
+- Manual MCP-to-Docker end-to-end verification succeeded.
+- Invalid `tail=0` produced an MCP tool error.
+- Inspecting a nonexistent container produced an MCP tool error.
+
+Real-container verification was performed separately from the automated tests. Docker Compose currently provides the development database. Kubernetes inspection and cross-system diagnostics remain planned.
 
 ## Roadmap
 
@@ -73,8 +97,8 @@ Real-container verification was performed separately from the automated tests. D
 | --- | --- | --- |
 | 1 | PostgreSQL client | Complete |
 | 2 | MCP server and PostgreSQL MCP tools | Complete |
-| 3 | Docker inspection tools | Next |
-| 4 | Kubernetes inspection tools | Planned |
+| 3 | Docker inspection tools | Complete |
+| 4 | Kubernetes inspection tools | Next |
 | 5 | Cross-system diagnostics | Planned |
 | 6 | Security and production hardening | Planned |
 
@@ -94,17 +118,18 @@ opspilot-mcp/
 │       ├── clients/
 │       │   ├── __init__.py
 │       │   ├── postgres.py           # Implemented PostgreSQL client
-│       │   ├── docker.py             # Placeholder
+│       │   ├── docker.py             # Implemented Docker client
 │       │   └── kubernetes.py         # Placeholder
 │       └── tools/
 │           ├── __init__.py
 │           ├── postgres.py           # Implemented PostgreSQL MCP tools
-│           ├── docker.py             # Placeholder
+│           ├── docker.py             # Implemented read-only Docker MCP tools
 │           └── kubernetes.py         # Placeholder
 └── tests/
     ├── __init__.py
     ├── test_postgres.py
-    └── test_mcp.py
+    ├── test_docker.py                # DockerClient unit tests
+    └── test_mcp.py                   # PostgreSQL and Docker MCP tool tests
 ```
 
 ## Local Development
@@ -137,20 +162,21 @@ With the virtual environment active, start the MCP server from the repository ro
 mcp run src/opspilot/server.py:mcp --transport stdio
 ```
 
-The server communicates with an MCP client over standard input and output and exposes `postgres_health`, `postgres_list_tables`, and `postgres_query`. Direct stdio server/client communication has been verified.
+The server communicates with an MCP client over standard input and output and exposes `postgres_health`, `postgres_list_tables`, `postgres_query`, `docker_health`, `docker_list_containers`, `docker_inspect_container`, and `docker_container_logs`. Direct stdio server/client communication and manual MCP-to-Docker end-to-end communication have been verified.
 
 ## Technology Stack
 
 | Technology | Role |
 | --- | --- |
 | Python | Server and infrastructure client implementation |
-| MCP | Implemented server protocol exposing PostgreSQL tools to AI assistants |
+| MCP | Implemented server protocol exposing PostgreSQL and Docker tools to AI assistants |
 | PostgreSQL | First supported infrastructure service |
 | Psycopg 3 | Synchronous PostgreSQL connectivity |
-| Docker | Development database container; inspection integration planned |
+| Docker | Development database container and implemented read-only inspection integration |
+| Docker SDK for Python | Docker API client |
 | Docker Compose | Local PostgreSQL development environment |
 | Kubernetes | Planned cluster inspection integration |
-| pytest | Automated PostgreSQL client and MCP tests |
+| pytest | Automated PostgreSQL client, DockerClient, and MCP tool tests |
 
 ## Security
 
