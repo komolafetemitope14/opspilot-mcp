@@ -1,6 +1,6 @@
 # OpsPilot MCP
 
-OpsPilot MCP is a Python-based local infrastructure MCP server in development that will allow AI assistants to inspect and diagnose PostgreSQL, Docker, and Kubernetes through the Model Context Protocol (MCP).
+OpsPilot MCP is a Python-based local infrastructure MCP server that allows AI assistants to inspect PostgreSQL through the Model Context Protocol (MCP). Docker inspection and Kubernetes integration are planned for later milestones.
 
 This README is a living project progress document, tracking implemented capabilities, verification results, and upcoming milestones.
 
@@ -17,7 +17,7 @@ Enable AI assistants to answer infrastructure questions such as:
 
 ## Architecture
 
-The planned architecture:
+The MCP server and PostgreSQL tools are implemented. Docker inspection and Kubernetes integration are planned:
 
 ```text
 AI / MCP Client
@@ -26,9 +26,9 @@ AI / MCP Client
        v
 OpsPilot MCP Server
        |
-       +---- PostgreSQL
-       +---- Docker
-       +---- Kubernetes
+       +---- PostgreSQL (implemented)
+       +---- Docker (planned)
+       +---- Kubernetes (planned)
 ```
 
 ## Current Status
@@ -47,29 +47,36 @@ Implemented and verified:
 - PostgreSQL read-only transactions for `execute_select()` queries, including those used by `list_tables()`.
 - Environment configuration using `.env`.
 - Credentials excluded from Git through the ignored `.env` file.
-- 23 passing pytest tests.
 - Integration verification against the real PostgreSQL 17 Docker container.
 
-The automated tests cover client behavior; real-container integration verification was performed separately. Docker Compose currently provides the development database. The MCP server, Docker inspection tools, and Kubernetes integrations are not yet implemented.
+**Milestone 2 — MCP server and PostgreSQL MCP tools: COMPLETE**
+
+The implemented MCP server exposes three PostgreSQL tools:
+
+- `postgres_health` — checks PostgreSQL connectivity.
+- `postgres_list_tables` — lists public-schema base tables.
+- `postgres_query` — executes one SELECT statement using the existing read-only PostgreSQL client path and returns dictionary results.
+
+Verification completed:
+
+- 38 pytest tests pass, covering PostgreSQL client behavior and MCP tools.
+- MCP tool discovery was tested.
+- stdio MCP server/client communication was tested.
+- Manual end-to-end verification against the real PostgreSQL Docker container succeeded: `postgres_health` returned `true`, `postgres_list_tables` returned `["services"]`, and `postgres_query` returned the three existing service records.
+- A DELETE sent through `postgres_query` was rejected and returned an MCP tool error.
+
+Real-container verification was performed separately from the automated tests. Docker Compose currently provides the development database. Docker inspection tools and Kubernetes integrations are not yet implemented.
 
 ## Roadmap
 
 | Milestone | Scope | Status |
 | --- | --- | --- |
 | 1 | PostgreSQL client | Complete |
-| 2 | MCP server and PostgreSQL MCP tools | Next |
-| 3 | Docker inspection tools | Planned |
+| 2 | MCP server and PostgreSQL MCP tools | Complete |
+| 3 | Docker inspection tools | Next |
 | 4 | Kubernetes inspection tools | Planned |
 | 5 | Cross-system diagnostics | Planned |
 | 6 | Security and production hardening | Planned |
-
-The next MCP tools are expected to be:
-
-- `postgres_health` — check PostgreSQL connectivity.
-- `postgres_list_tables` — list public-schema base tables.
-- `postgres_query` — execute a single SELECT query and return dictionary results.
-
-These tools will expose the existing PostgreSQL client through MCP in Milestone 2.
 
 ## Current Project Structure
 
@@ -83,7 +90,7 @@ opspilot-mcp/
 ├── src/
 │   └── opspilot/
 │       ├── __init__.py
-│       ├── server.py                 # MCP server placeholder
+│       ├── server.py                 # Implemented MCP server
 │       ├── clients/
 │       │   ├── __init__.py
 │       │   ├── postgres.py           # Implemented PostgreSQL client
@@ -91,12 +98,13 @@ opspilot-mcp/
 │       │   └── kubernetes.py         # Placeholder
 │       └── tools/
 │           ├── __init__.py
-│           ├── postgres.py           # PostgreSQL MCP tools placeholder
+│           ├── postgres.py           # Implemented PostgreSQL MCP tools
 │           ├── docker.py             # Placeholder
 │           └── kubernetes.py         # Placeholder
 └── tests/
     ├── __init__.py
-    └── test_postgres.py
+    ├── test_postgres.py
+    └── test_mcp.py
 ```
 
 ## Local Development
@@ -121,18 +129,28 @@ python -m pytest -v
 
 Docker Compose starts a PostgreSQL 17 container named `opspilot-postgres`. The client reads `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from the environment or `.env`; existing environment variables take precedence.
 
+### Local MCP Usage
+
+With the virtual environment active, start the MCP server from the repository root:
+
+```bash
+mcp run src/opspilot/server.py:mcp --transport stdio
+```
+
+The server communicates with an MCP client over standard input and output and exposes `postgres_health`, `postgres_list_tables`, and `postgres_query`. Direct stdio server/client communication has been verified.
+
 ## Technology Stack
 
 | Technology | Role |
 | --- | --- |
 | Python | Server and infrastructure client implementation |
-| MCP | Planned protocol for exposing tools to AI assistants |
+| MCP | Implemented server protocol exposing PostgreSQL tools to AI assistants |
 | PostgreSQL | First supported infrastructure service |
 | Psycopg 3 | Synchronous PostgreSQL connectivity |
 | Docker | Development database container; inspection integration planned |
 | Docker Compose | Local PostgreSQL development environment |
 | Kubernetes | Planned cluster inspection integration |
-| pytest | Automated client tests |
+| pytest | Automated PostgreSQL client and MCP tests |
 
 ## Security
 
