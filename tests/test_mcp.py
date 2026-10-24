@@ -25,7 +25,7 @@ def run(coroutine):
 
 def assert_tools(tools):
     by_name = {tool.name: tool for tool in tools}
-    assert len(tools) == 15
+    assert len(tools) == 16
     assert set(by_name) == {
         "postgres_health", "postgres_list_tables", "postgres_query",
         "docker_health", "docker_list_containers", "docker_inspect_container",
@@ -34,9 +34,10 @@ def assert_tools(tools):
         "kubernetes_inspect_pod", "kubernetes_pod_logs", "kubernetes_list_events",
         "diagnose_kubernetes_issues",
         "diagnose_docker_issues",
+        "diagnose_postgres_issues",
     }
     for name in ("postgres_health", "postgres_list_tables", "docker_health", "docker_list_containers",
-                 "kubernetes_health", "kubernetes_list_namespaces"):
+                 "kubernetes_health", "kubernetes_list_namespaces", "diagnose_postgres_issues"):
         schema = by_name[name].input_schema
         assert schema["type"] == "object"
         assert schema["properties"] == {}

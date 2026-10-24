@@ -6,8 +6,10 @@ from mcp.server import MCPServer
 
 from opspilot.clients.docker import DockerClient
 from opspilot.clients.kubernetes import KubernetesClient
+from opspilot.clients.postgres import PostgresClient
 from opspilot.diagnostics.docker import DockerDiagnostics
 from opspilot.diagnostics.kubernetes import KubernetesDiagnostics
+from opspilot.diagnostics.postgres import PostgresDiagnostics
 
 
 def register_diagnostic_tools(mcp: MCPServer) -> None:
@@ -25,6 +27,21 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         diagnostics = DockerDiagnostics()
 
         return diagnostics.diagnose_container(container)
+
+    @mcp.tool()
+    def diagnose_postgres_issues() -> dict[str, Any]:
+        """Diagnose PostgreSQL using health and public-table observations."""
+        client = PostgresClient()
+
+        healthy = client.health_check()
+        tables = client.list_tables()
+
+        diagnostics = PostgresDiagnostics()
+
+        return diagnostics.diagnose_database(
+            healthy=healthy,
+            tables=tables,
+        )
 
     @mcp.tool()
     def diagnose_kubernetes_issues(

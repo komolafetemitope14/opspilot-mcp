@@ -102,6 +102,54 @@ def test_diagnose_docker_issues(
     assert result == expected
 
 
+def test_registers_postgres_diagnostic_tool():
+    mcp = MCPServer("test")
+
+    register_diagnostic_tools(mcp)
+
+    assert "diagnose_postgres_issues" in mcp._tool_manager._tools
+
+
+@patch("opspilot.tools.diagnostics.PostgresDiagnostics")
+@patch("opspilot.tools.diagnostics.PostgresClient")
+def test_diagnose_postgres_issues(
+    mock_client_class,
+    mock_diagnostics_class,
+):
+    client = Mock()
+    diagnostics = Mock()
+
+    mock_client_class.return_value = client
+    mock_diagnostics_class.return_value = diagnostics
+
+    client.health_check.return_value = True
+    client.list_tables.return_value = ["services"]
+
+    expected = {
+        "status": "healthy",
+        "system": "postgresql",
+        "resource": {
+            "kind": "Database",
+        },
+        "findings": [],
+    }
+    diagnostics.diagnose_database.return_value = expected
+
+    mcp = MCPServer("test")
+    register_diagnostic_tools(mcp)
+
+    tool = get_tool_function(mcp, "diagnose_postgres_issues")
+    result = tool()
+
+    client.health_check.assert_called_once_with()
+    client.list_tables.assert_called_once_with()
+    diagnostics.diagnose_database.assert_called_once_with(
+        healthy=True,
+        tables=["services"],
+    )
+    assert result == expected
+
+
 def test_registers_kubernetes_diagnostic_tool():
     mcp = MCPServer("test")
 
