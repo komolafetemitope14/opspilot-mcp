@@ -17,7 +17,7 @@ Enable AI assistants to answer infrastructure questions such as:
 
 ## Architecture
 
-The MCP server, PostgreSQL tools, read-only Docker and Kubernetes inspection tools, and deterministic Kubernetes diagnostics are implemented:
+The MCP server, PostgreSQL tools, read-only Docker and Kubernetes inspection tools, and deterministic Kubernetes and Docker diagnostics are implemented:
 
 ```text
 AI / MCP Client
@@ -29,7 +29,7 @@ OpsPilot MCP Server
        +---- PostgreSQL (implemented)
        +---- Docker (implemented, read-only)
        +---- Kubernetes (implemented, read-only)
-       +---- diagnostics/ (deterministic Kubernetes diagnostics)
+       +---- diagnostics/ (deterministic Kubernetes and Docker diagnostics)
 ```
 
 ## Current Status
@@ -129,9 +129,10 @@ Real-cluster verification was performed separately from the automated tests.
 
 **Milestone 5 — Cross-System Diagnostics: IN PROGRESS**
 
-The first Kubernetes diagnostics vertical slice is implemented and verified. OpsPilot now exposes 14 MCP tools total: 3 PostgreSQL inspection tools, 4 Docker inspection tools, 6 Kubernetes inspection tools, and 1 diagnostic tool:
+The Kubernetes and Docker diagnostics vertical slices are complete and verified. OpsPilot now exposes 15 MCP tools total: 3 PostgreSQL inspection tools, 4 Docker inspection tools, 6 Kubernetes inspection tools, and 2 diagnostic tools:
 
 - `diagnose_kubernetes_issues` — analyzes a named Pod's state and related Kubernetes Events using the deterministic `KubernetesDiagnostics` engine under `src/opspilot/diagnostics/`.
+- `diagnose_docker_issues` — collects curated container state through `DockerClient` and passes it to the deterministic `DockerDiagnostics` engine in `src/opspilot/diagnostics/docker.py`.
 
 Structured diagnostic results include:
 
@@ -139,7 +140,7 @@ Structured diagnostic results include:
 - `system` and resource identity (`kind`, `name`, and `namespace`).
 - `findings` with `code`, `severity`, `summary`, `evidence`, and `recommendation`.
 
-Current diagnostic rules cover:
+Current Kubernetes diagnostic rules cover:
 
 - Pod not running.
 - Pod not ready.
@@ -150,18 +151,30 @@ Current diagnostic rules cover:
 
 Multiple image-pull observations are correlated into one `image_pull_failure` finding with aggregated evidence.
 
-The architecture separates responsibilities: `clients/` collect infrastructure observations, `diagnostics/` interpret and correlate those observations, and `tools/` expose functionality through MCP. The diagnostic engine is deterministic; an LLM is not required inside OpsPilot. An external AI/MCP client can reason over the structured diagnostic results.
+Current Docker diagnostic rules cover:
+
+- Container not running -> warning (`container_not_running`).
+- Non-zero exit code -> error (`container_nonzero_exit`).
+- Docker health unhealthy -> error.
+- Docker health starting -> warning.
+- Any error makes the overall status `unhealthy`.
+- Warnings without errors make the overall status `degraded`.
+- No findings makes the overall status `healthy`.
+
+The architecture separates responsibilities: `clients/` collect facts from external systems, `diagnostics/` deterministically interpret those facts, and `tools/` expose and orchestrate them through MCP. The diagnostic engine is deterministic; an LLM is not required inside OpsPilot. An external AI/MCP client can reason over the structured diagnostic results.
 
 Verification completed:
 
-- 177 tests pass in the current automated suite.
+- 185 tests pass in the current automated suite.
 - Real end-to-end verification against the local kind cluster succeeded through the full path: MCP Client -> OpsPilot MCP Server -> `diagnose_kubernetes_issues` -> `KubernetesClient` -> real Kubernetes Pod/Events -> `KubernetesDiagnostics` -> structured MCP response.
 - A deliberately broken test Pod used `nginx:this-tag-does-not-exist` and reached `ImagePullBackOff`.
 - The resulting MCP diagnosis correctly returned status `unhealthy` and an `image_pull_failure` finding.
 - The broken test Pod was deleted after verification.
 - The normal `opspilot-demo` workload remains healthy with two running replicas.
+- Real Docker end-to-end verification used a deliberately failed Alpine container that exited with code 7. The MCP client discovered 15 tools, and `diagnose_docker_issues` returned an `unhealthy` structured result with `container_not_running` and `container_nonzero_exit` findings.
+- The temporary diagnostic container was removed afterward.
 
-Docker diagnostics, PostgreSQL diagnostics, and cross-system correlation remain future Milestone 5 work. Milestone 6 security and production hardening remains planned.
+PostgreSQL diagnostics and cross-system correlation remain to be implemented as part of Milestone 5. Milestone 6 security and production hardening remains planned.
 
 ## Roadmap
 
@@ -194,13 +207,14 @@ opspilot-mcp/
 │       │   └── kubernetes.py         # Implemented read-only Kubernetes client
 │       ├── diagnostics/
 │       │   ├── __init__.py
+│       │   ├── docker.py             # Deterministic Docker diagnostic engine
 │       │   └── kubernetes.py         # Deterministic Kubernetes diagnostic engine
 │       └── tools/
 │           ├── __init__.py
 │           ├── postgres.py           # Implemented PostgreSQL MCP tools
 │           ├── docker.py             # Implemented read-only Docker MCP tools
 │           ├── kubernetes.py         # Implemented read-only Kubernetes MCP tools
-│           └── diagnostics.py        # Implemented Kubernetes diagnostic MCP tool
+│           └── diagnostics.py        # Implemented Kubernetes and Docker diagnostic MCP tools
 └── tests/
     ├── __init__.py
     ├── test_postgres.py
@@ -208,6 +222,7 @@ opspilot-mcp/
     ├── test_kubernetes.py            # KubernetesClient unit tests
     ├── test_mcp.py                   # PostgreSQL, Docker, and Kubernetes MCP tool tests
     ├── test_diagnostic_tools.py      # Diagnostic MCP tool tests
+    ├── test_docker_diagnostics.py    # Docker diagnostic engine tests
     └── test_kubernetes_diagnostics.py # Kubernetes diagnostic engine tests
 ```
 
@@ -241,7 +256,7 @@ With the virtual environment active, start the MCP server from the repository ro
 mcp run src/opspilot/server.py:mcp --transport stdio
 ```
 
-The server communicates with an MCP client over standard input and output and exposes the 14 inspection and diagnostic tools listed above. Direct stdio server/client communication, manual MCP-to-Docker communication, and real end-to-end MCP -> OpsPilot -> Kubernetes calls for all six Kubernetes tools have been verified.
+The server communicates with an MCP client over standard input and output and exposes the 15 inspection and diagnostic tools listed above. Direct stdio server/client communication, manual MCP-to-Docker communication, and real end-to-end MCP -> OpsPilot -> Kubernetes calls for all six Kubernetes tools have been verified.
 
 ## Technology Stack
 

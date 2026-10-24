@@ -5,6 +5,19 @@ from mcp.server import MCPServer
 from opspilot.tools.diagnostics import register_diagnostic_tools
 
 
+def make_container():
+    return {
+        "id": "abc123",
+        "name": "broken-container",
+        "image": "example:latest",
+        "status": "exited",
+        "health": None,
+        "running": False,
+        "exit_code": 7,
+        "ports": {},
+    }
+
+
 def make_pod():
     return {
         "name": "broken-pod",
@@ -42,6 +55,51 @@ def make_event(
 def get_tool_function(mcp, name):
     tool = mcp._tool_manager._tools[name]
     return tool.fn
+
+
+def test_registers_docker_diagnostic_tool():
+    mcp = MCPServer("test")
+
+    register_diagnostic_tools(mcp)
+
+    assert "diagnose_docker_issues" in mcp._tool_manager._tools
+
+
+@patch("opspilot.tools.diagnostics.DockerDiagnostics")
+@patch("opspilot.tools.diagnostics.DockerClient")
+def test_diagnose_docker_issues(
+    mock_client_class,
+    mock_diagnostics_class,
+):
+    client = Mock()
+    diagnostics = Mock()
+
+    mock_client_class.return_value = client
+    mock_diagnostics_class.return_value = diagnostics
+
+    container = make_container()
+    client.inspect_container.return_value = container
+
+    expected = {
+        "status": "unhealthy",
+        "system": "docker",
+        "resource": {
+            "kind": "Container",
+            "name": "broken-container",
+        },
+        "findings": [],
+    }
+    diagnostics.diagnose_container.return_value = expected
+
+    mcp = MCPServer("test")
+    register_diagnostic_tools(mcp)
+
+    tool = get_tool_function(mcp, "diagnose_docker_issues")
+    result = tool("broken-container")
+
+    client.inspect_container.assert_called_once_with("broken-container")
+    diagnostics.diagnose_container.assert_called_once_with(container)
+    assert result == expected
 
 
 def test_registers_kubernetes_diagnostic_tool():
