@@ -305,3 +305,122 @@ def test_diagnose_kubernetes_issues_filters_unrelated_events(
         pod,
         [matching_event],
     )
+
+
+def test_registers_cross_system_diagnostic_tool():
+    mcp = MCPServer("test")
+
+    register_diagnostic_tools(mcp)
+
+    assert "diagnose_cross_system_issues" in mcp._tool_manager._tools
+
+
+@patch("opspilot.tools.diagnostics.CorrelationDiagnostics")
+@patch("opspilot.tools.diagnostics.PostgresDiagnostics")
+@patch("opspilot.tools.diagnostics.PostgresClient")
+@patch("opspilot.tools.diagnostics.KubernetesDiagnostics")
+@patch("opspilot.tools.diagnostics.KubernetesClient")
+def test_diagnose_cross_system_issues(
+    mock_kubernetes_client_class,
+    mock_kubernetes_diagnostics_class,
+    mock_postgres_client_class,
+    mock_postgres_diagnostics_class,
+    mock_correlation_diagnostics_class,
+):
+    kubernetes_client = Mock()
+    kubernetes_diagnostics = Mock()
+    postgres_client = Mock()
+    postgres_diagnostics = Mock()
+    correlation_diagnostics = Mock()
+
+    mock_kubernetes_client_class.return_value = kubernetes_client
+    mock_kubernetes_diagnostics_class.return_value = kubernetes_diagnostics
+    mock_postgres_client_class.return_value = postgres_client
+    mock_postgres_diagnostics_class.return_value = postgres_diagnostics
+    mock_correlation_diagnostics_class.return_value = correlation_diagnostics
+
+    pod = make_pod()
+    matching_event = make_event()
+    other_pod_event = make_event(
+        name="another-pod",
+        message="Another Pod warning",
+    )
+
+    kubernetes_client.inspect_pod.return_value = pod
+    kubernetes_client.list_events.return_value = [
+        matching_event,
+        other_pod_event,
+    ]
+
+    kubernetes = {
+        "status": "unhealthy",
+        "system": "kubernetes",
+        "resource": {
+            "kind": "Pod",
+            "name": "broken-pod",
+            "namespace": "default",
+        },
+        "findings": [],
+    }
+    kubernetes_diagnostics.diagnose_pod.return_value = kubernetes
+
+    postgres_client.health_check.return_value = False
+    postgres_client.list_tables.return_value = ["services"]
+
+    postgres = {
+        "status": "unhealthy",
+        "system": "postgresql",
+        "resource": {
+            "kind": "Database",
+        },
+        "findings": [],
+    }
+    postgres_diagnostics.diagnose_database.return_value = postgres
+
+    expected = {
+        "status": "unhealthy",
+        "system": "cross-system",
+        "resource": {
+            "kind": "Correlation",
+        },
+        "findings": [
+            {
+                "code": "possible_database_dependency_failure",
+                "severity": "error",
+                "summary": "Kubernetes and PostgreSQL are unhealthy.",
+                "evidence": [
+                    "Kubernetes diagnosis is unhealthy.",
+                    "PostgreSQL diagnosis is unhealthy.",
+                ],
+                "recommendation": "Check the application's database connection.",
+            },
+        ],
+    }
+    correlation_diagnostics.correlate.return_value = expected
+
+    mcp = MCPServer("test")
+    register_diagnostic_tools(mcp)
+
+    tool = get_tool_function(mcp, "diagnose_cross_system_issues")
+    result = tool("broken-pod")
+
+    kubernetes_client.inspect_pod.assert_called_once_with(
+        "broken-pod",
+        "default",
+    )
+    kubernetes_client.list_events.assert_called_once_with("default")
+    kubernetes_diagnostics.diagnose_pod.assert_called_once_with(
+        pod,
+        [matching_event],
+    )
+    postgres_client.health_check.assert_called_once_with()
+    postgres_client.list_tables.assert_called_once_with()
+    postgres_diagnostics.diagnose_database.assert_called_once_with(
+        healthy=False,
+        tables=["services"],
+    )
+    correlation_diagnostics.correlate.assert_called_once_with(
+        kubernetes=kubernetes,
+        postgres=postgres,
+    )
+    assert result == expected

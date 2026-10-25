@@ -7,6 +7,7 @@ from mcp.server import MCPServer
 from opspilot.clients.docker import DockerClient
 from opspilot.clients.kubernetes import KubernetesClient
 from opspilot.clients.postgres import PostgresClient
+from opspilot.diagnostics.correlation import CorrelationDiagnostics
 from opspilot.diagnostics.docker import DockerDiagnostics
 from opspilot.diagnostics.kubernetes import KubernetesDiagnostics
 from opspilot.diagnostics.postgres import PostgresDiagnostics
@@ -66,4 +67,49 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         return diagnostics.diagnose_pod(
             pod,
             pod_events,
+        )
+
+    @mcp.tool()
+    def diagnose_cross_system_issues(
+        name: str,
+        namespace: str = "default",
+    ) -> dict[str, Any]:
+        """Correlate Kubernetes and PostgreSQL diagnostic results."""
+        kubernetes_client = KubernetesClient()
+
+        pod = kubernetes_client.inspect_pod(
+            name,
+            namespace,
+        )
+        events = kubernetes_client.list_events(namespace)
+
+        pod_events = [
+            event
+            for event in events
+            if event["kind"] == "Pod"
+            and event["name"] == name
+        ]
+
+        kubernetes_diagnostics = KubernetesDiagnostics()
+        kubernetes = kubernetes_diagnostics.diagnose_pod(
+            pod,
+            pod_events,
+        )
+
+        postgres_client = PostgresClient()
+
+        healthy = postgres_client.health_check()
+        tables = postgres_client.list_tables()
+
+        postgres_diagnostics = PostgresDiagnostics()
+        postgres = postgres_diagnostics.diagnose_database(
+            healthy=healthy,
+            tables=tables,
+        )
+
+        correlation_diagnostics = CorrelationDiagnostics()
+
+        return correlation_diagnostics.correlate(
+            kubernetes=kubernetes,
+            postgres=postgres,
         )

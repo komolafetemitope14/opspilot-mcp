@@ -25,7 +25,7 @@ def run(coroutine):
 
 def assert_tools(tools):
     by_name = {tool.name: tool for tool in tools}
-    assert len(tools) == 16
+    assert len(tools) == 17
     assert set(by_name) == {
         "postgres_health", "postgres_list_tables", "postgres_query",
         "docker_health", "docker_list_containers", "docker_inspect_container",
@@ -35,6 +35,7 @@ def assert_tools(tools):
         "diagnose_kubernetes_issues",
         "diagnose_docker_issues",
         "diagnose_postgres_issues",
+        "diagnose_cross_system_issues",
     }
     for name in ("postgres_health", "postgres_list_tables", "docker_health", "docker_list_containers",
                  "kubernetes_health", "kubernetes_list_namespaces", "diagnose_postgres_issues"):
@@ -65,7 +66,8 @@ def assert_tools(tools):
         namespace = schema["properties"]["namespace"]
         assert namespace["default"] is None
         assert {option["type"] for option in namespace["anyOf"]} == {"string", "null"}
-    for name in ("kubernetes_inspect_pod", "kubernetes_pod_logs"):
+    for name in ("kubernetes_inspect_pod", "kubernetes_pod_logs",
+                 "diagnose_kubernetes_issues", "diagnose_cross_system_issues"):
         schema = by_name[name].input_schema
         assert schema["type"] == "object"
         expected = {"name", "namespace", "tail"} if name == "kubernetes_pod_logs" else {"name", "namespace"}
