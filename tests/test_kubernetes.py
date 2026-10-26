@@ -13,6 +13,8 @@ from opspilot.clients import kubernetes
 @pytest.fixture
 def cluster(monkeypatch):
     sdk = MagicMock()
+    sdk.CoreV1Api.return_value.api_client.configuration = SimpleNamespace(
+        password=None, api_key={}, refresh_api_key_hook=None)
     monkeypatch.setattr(kubernetes.config, "load_kube_config", sdk.load_kube_config)
     monkeypatch.setattr(kubernetes.client, "CoreV1Api", sdk.CoreV1Api)
     return sdk
@@ -324,3 +326,18 @@ def test_list_events_api_exception_propagates_unchanged(cluster, namespace, sdk_
         kubernetes.KubernetesClient().list_events(namespace)
 
     assert caught.value is error
+
+
+def test_effective_credentials_registered_and_refreshed(cluster, monkeypatch):
+    from opspilot.redaction import registry, redactor
+    configuration = cluster.CoreV1Api.return_value.api_client.configuration
+    configuration.password = "kube-configured-password"
+    configuration.api_key = {"authorization": "Bearer kube-original-secret"}
+
+    def refresh(current):
+        current.api_key["authorization"] = "Bearer kube-refreshed-secret"
+    configuration.refresh_api_key_hook = refresh
+    kubernetes.KubernetesClient()
+    assert redactor.redact_text("kube-configured-password kube-original-secret") == "[REDACTED] [REDACTED]"
+    configuration.refresh_api_key_hook(configuration)
+    assert redactor.redact_text("kube-refreshed-secret") == "[REDACTED]"

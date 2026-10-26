@@ -5,10 +5,23 @@ from typing import Any
 from kubernetes import client, config
 
 
+from opspilot.redaction import register_kubernetes_credentials
+
+
 class KubernetesClient:
     def __init__(self) -> None:
         config.load_kube_config()
         self._client = client.CoreV1Api()
+        configuration = self._client.api_client.configuration
+        register_kubernetes_credentials(configuration)
+        refresh = configuration.refresh_api_key_hook
+        if refresh is not None:
+            def register_refresh(current):
+                try:
+                    refresh(current)
+                finally:
+                    register_kubernetes_credentials(current)
+            configuration.refresh_api_key_hook = register_refresh
 
     def health_check(self) -> bool:
         """Request core API discovery; configuration and API errors propagate."""

@@ -9,9 +9,13 @@ from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
 
+from opspilot.redaction import registry
+
+
 class PostgresClient:
     def __init__(self) -> None:
         load_dotenv(override=False)
+        registry.register_environment(os.environ)
         names = {
             "host": "POSTGRES_HOST",
             "port": "POSTGRES_PORT",

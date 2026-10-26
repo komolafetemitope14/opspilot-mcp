@@ -123,3 +123,14 @@ def test_connection_error_propagates(database):
     connect.side_effect = psycopg.OperationalError("unavailable")
     with pytest.raises(psycopg.OperationalError):
         postgres.PostgresClient().health_check()
+
+
+def test_effective_password_registered_before_connection_failure(config, database):
+    from opspilot.redaction import redactor
+    connect, _, _ = database
+    def fail(**kwargs):
+        assert redactor.redact_text(kwargs["password"]) == "[REDACTED]"
+        raise psycopg.OperationalError("connection failed")
+    connect.side_effect = fail
+    with pytest.raises(psycopg.OperationalError):
+        postgres.PostgresClient().health_check()
