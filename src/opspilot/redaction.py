@@ -171,3 +171,25 @@ def register_kubernetes_credentials(configuration):
         registry.register(value)
         if isinstance(value, str) and value.lower().startswith("bearer "):
             registry.register(value[7:])
+
+
+def install_kubernetes_registration(configuration):
+    """Keep registering credentials even when an SDK refresh replaces its hook."""
+    register_kubernetes_credentials(configuration)
+    refresh = configuration.refresh_api_key_hook
+    if refresh is None:
+        return
+
+    def register_refresh(current):
+        nonlocal refresh
+        try:
+            if refresh is not None:
+                refresh(current)
+        finally:
+            register_kubernetes_credentials(current)
+            replacement = current.refresh_api_key_hook
+            if replacement is not register_refresh:
+                refresh = replacement
+            current.refresh_api_key_hook = register_refresh
+
+    configuration.refresh_api_key_hook = register_refresh

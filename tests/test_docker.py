@@ -10,7 +10,8 @@ from opspilot.clients import docker
 @pytest.fixture
 def engine(monkeypatch):
     from_env = MagicMock()
-    monkeypatch.setattr(docker.docker, "from_env", from_env)
+    monkeypatch.setattr(docker, "load_docker_settings", MagicMock(return_value=docker.DockerSettings("unix:///tmp/test.sock")))
+    monkeypatch.setattr(docker.docker, "DockerClient", from_env)
     return from_env, from_env.return_value
 
 
@@ -32,10 +33,10 @@ def container():
     return result
 
 
-def test_construction_uses_from_env(engine):
+def test_construction_uses_validated_settings(engine):
     from_env, _ = engine
     docker.DockerClient()
-    from_env.assert_called_once_with()
+    from_env.assert_called_once_with(base_url="unix:///tmp/test.sock")
 
 
 def test_construction_errors_propagate(engine):
@@ -249,3 +250,20 @@ def test_diagnostic_tool_sdk_calls_are_inspection_only(engine, container):
     assert result["status"] == "healthy"
     assert sdk.mock_calls == [call.containers.get("web"), call.close()]
     assert container.method_calls == []
+
+
+def test_configuration_failure_prevents_client_and_transport_construction(monkeypatch):
+    from opspilot.configuration import ConfigurationError
+    loader = MagicMock(side_effect=ConfigurationError("DOCKER_HOST is invalid"))
+    forbidden = MagicMock(side_effect=AssertionError("Must not activate Docker"))
+    monkeypatch.setattr(docker, "load_docker_settings", loader)
+    for name in ("DockerClient", "APIClient", "from_env"):
+        monkeypatch.setattr(docker_sdk, name, forbidden)
+    for name in ("UnixHTTPAdapter", "SSHHTTPAdapter", "NpipeHTTPAdapter"):
+        # SSH/named-pipe adapters are optional platform/dependency imports.
+        monkeypatch.setattr(docker_sdk.api.client, name, forbidden, raising=False)
+    monkeypatch.setattr(docker_sdk.api.client.requests.adapters, "HTTPAdapter", forbidden)
+    with pytest.raises(ConfigurationError):
+        docker.DockerClient()
+    loader.assert_called_once_with()
+    forbidden.assert_not_called()

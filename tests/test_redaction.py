@@ -131,3 +131,55 @@ def test_protocol_error_is_sanitized():
         assert caught.value.message == "token=[REDACTED]"
         assert caught.value.data == {"password": REDACTED}
     asyncio.run(check())
+
+
+def test_refresh_registration_survives_sdk_hook_replacement():
+    from opspilot.redaction import install_kubernetes_registration, redactor
+    configuration = SimpleNamespace(password=None, api_key={}, refresh_api_key_hook=None)
+    count = 0
+
+    def sdk_refresh(current):
+        nonlocal count
+        count += 1
+        current.api_key["authorization"] = f"Bearer synthetic-refresh-secret-{count}"
+        # Kubernetes SDK _set_config installs a new function on every refresh.
+        current.refresh_api_key_hook = lambda conf: sdk_refresh(conf)
+
+    configuration.refresh_api_key_hook = sdk_refresh
+    install_kubernetes_registration(configuration)
+    wrapper = configuration.refresh_api_key_hook
+    for number in range(1, 4):
+        configuration.refresh_api_key_hook(configuration)
+        assert configuration.refresh_api_key_hook is wrapper
+        assert redactor.redact_text(f"synthetic-refresh-secret-{number}") == REDACTED
+
+
+def test_refresh_registration_restored_on_replacing_hook_failure():
+    from opspilot.redaction import install_kubernetes_registration, redactor
+    configuration = SimpleNamespace(password=None, api_key={}, refresh_api_key_hook=None)
+
+    def failing(current):
+        current.api_key["authorization"] = "Bearer synthetic-failed-refresh"
+        current.refresh_api_key_hook = lambda conf: None
+        raise ValueError("refresh failed")
+
+    configuration.refresh_api_key_hook = failing
+    install_kubernetes_registration(configuration)
+    wrapper = configuration.refresh_api_key_hook
+    with pytest.raises(ValueError):
+        wrapper(configuration)
+    assert configuration.refresh_api_key_hook is wrapper
+    assert redactor.redact_text("synthetic-failed-refresh") == REDACTED
+    wrapper(configuration)
+    assert configuration.refresh_api_key_hook is wrapper
+
+
+def test_refresh_registration_stays_installed_when_sdk_clears_hook():
+    from opspilot.redaction import install_kubernetes_registration
+    configuration = SimpleNamespace(password=None, api_key={}, refresh_api_key_hook=None)
+    configuration.refresh_api_key_hook = lambda current: setattr(current, "refresh_api_key_hook", None)
+    install_kubernetes_registration(configuration)
+    wrapper = configuration.refresh_api_key_hook
+    wrapper(configuration)
+    wrapper(configuration)
+    assert configuration.refresh_api_key_hook is wrapper

@@ -15,22 +15,30 @@ def cluster(monkeypatch):
     sdk = MagicMock()
     sdk.CoreV1Api.return_value.api_client.configuration = SimpleNamespace(
         password=None, api_key={}, refresh_api_key_hook=None)
-    monkeypatch.setattr(kubernetes.config, "load_kube_config", sdk.load_kube_config)
+    monkeypatch.setattr(kubernetes, "load_kubernetes_settings", MagicMock())
+    monkeypatch.setattr(kubernetes.config, "load_kube_config_from_dict", sdk.load_kube_config)
+    monkeypatch.setattr(kubernetes.client, "Configuration", lambda: sdk.CoreV1Api.return_value.api_client.configuration)
+    monkeypatch.setattr(kubernetes.client, "ApiClient", sdk.ApiClient)
     monkeypatch.setattr(kubernetes.client, "CoreV1Api", sdk.CoreV1Api)
     return sdk
 
 
 def test_construction_loads_kubeconfig_before_creating_api(cluster):
     kubernetes.KubernetesClient()
-    assert cluster.mock_calls == [call.load_kube_config(), call.CoreV1Api()]
+    cluster.load_kube_config.assert_called_once()
+    assert cluster.load_kube_config.call_args.kwargs["persist_config"] is False
+    effective = cluster.load_kube_config.call_args.kwargs["client_configuration"]
+    cluster.ApiClient.assert_called_once_with(configuration=effective)
+    cluster.CoreV1Api.assert_called_once_with(cluster.ApiClient.return_value)
 
 
 def test_configuration_errors_propagate(cluster):
     error = ConfigException("invalid kubeconfig")
     cluster.load_kube_config.side_effect = error
-    with pytest.raises(ConfigException) as caught:
+    with pytest.raises(kubernetes.ConfigurationError) as caught:
         kubernetes.KubernetesClient()
-    assert caught.value is error
+    assert "invalid kubeconfig" not in str(caught.value)
+    assert caught.value.__suppress_context__
     cluster.CoreV1Api.assert_not_called()
 
 
@@ -341,3 +349,92 @@ def test_effective_credentials_registered_and_refreshed(cluster, monkeypatch):
     assert redactor.redact_text("kube-configured-password kube-original-secret") == "[REDACTED] [REDACTED]"
     configuration.refresh_api_key_hook(configuration)
     assert redactor.redact_text("kube-refreshed-secret") == "[REDACTED]"
+
+
+def test_validated_static_snapshot_uses_explicit_real_sdk_configuration(monkeypatch, tmp_path):
+    from opspilot.configuration import load_kubernetes_settings
+    path = tmp_path / "config"
+    path.write_text(json.dumps({
+        "current-context": "reader",
+        "contexts": [{"name": "reader", "context": {"cluster": "cluster", "user": "reader"}}],
+        "clusters": [{"name": "cluster", "cluster": {"server": "https://synthetic.example"}}],
+        "users": [{"name": "reader", "user": {"token": "synthetic-sdk-token"}}],
+    }))
+    settings = load_kubernetes_settings({}, path)
+    api_client = MagicMock()
+    core = MagicMock()
+    monkeypatch.setattr(kubernetes.client, "ApiClient", api_client)
+    monkeypatch.setattr(kubernetes.client, "CoreV1Api", core)
+    default = kubernetes.client.Configuration._default
+    kubernetes.KubernetesClient(settings)
+    effective = api_client.call_args.kwargs["configuration"]
+    assert effective.host == "https://synthetic.example"
+    assert effective.verify_ssl is True
+    assert effective.api_key["authorization"] == "Bearer synthetic-sdk-token"
+    assert kubernetes.client.Configuration._default is default
+    core.assert_called_once_with(api_client.return_value)
+    assert core.return_value.method_calls == []
+
+
+def test_configuration_failure_prevents_sdk_activation(monkeypatch):
+    loader = MagicMock(side_effect=kubernetes.ConfigurationError("kubeconfig is invalid"))
+    forbidden = MagicMock(side_effect=AssertionError("Must not activate Kubernetes"))
+    monkeypatch.setattr(kubernetes, "load_kubernetes_settings", loader)
+    monkeypatch.setattr(kubernetes.config, "load_kube_config_from_dict", forbidden)
+    monkeypatch.setattr(kubernetes.config, "load_kube_config", forbidden)
+    for name in ("Configuration", "ApiClient", "CoreV1Api"):
+        monkeypatch.setattr(kubernetes.client, name, forbidden)
+    with pytest.raises(kubernetes.ConfigurationError):
+        kubernetes.KubernetesClient()
+    loader.assert_called_once_with()
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("mutation", ["change", "delete"])
+def test_activation_uses_snapshot_after_source_material_changes(monkeypatch, tmp_path, mutation):
+    import base64
+    import socket
+    import subprocess
+    from pathlib import Path
+    from opspilot.configuration import load_kubernetes_settings
+
+    forbidden = MagicMock(side_effect=AssertionError("Must not contact infrastructure"))
+    monkeypatch.setattr(socket, "getaddrinfo", forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    material = {"token": "snapshot-token", "ca": "snapshot-ca",
+                "cert": "snapshot-certificate", "key": "snapshot-private-key"}
+    for name, value in material.items():
+        (tmp_path / name).write_text(value)
+    path = tmp_path / "config"
+    path.write_text(json.dumps({
+        "current-context": "reader",
+        "contexts": [{"name": "reader", "context": {"cluster": "cluster", "user": "reader"}}],
+        "clusters": [{"name": "cluster", "cluster": {
+            "server": "https://snapshot.example", "certificate-authority": "ca"}}],
+        "users": [{"name": "reader", "user": {
+            "tokenFile": "token", "client-certificate": "cert", "client-key": "key"}}],
+    }))
+    settings = load_kubernetes_settings({}, path)
+    for original in [path, *(tmp_path / name for name in material)]:
+        if mutation == "delete":
+            original.unlink()
+        else:
+            original.write_text("changed-after-validation")
+    api_client, core = MagicMock(), MagicMock()
+    monkeypatch.setattr(kubernetes.client, "ApiClient", api_client)
+    monkeypatch.setattr(kubernetes.client, "CoreV1Api", core)
+    kubernetes.KubernetesClient(settings)
+    effective = api_client.call_args.kwargs["configuration"]
+    assert effective.host == "https://snapshot.example"
+    assert effective.api_key["authorization"] == "Bearer snapshot-token"
+    assert effective.verify_ssl is True
+    for name, sdk_path in (("ca", effective.ssl_ca_cert),
+                           ("cert", effective.cert_file), ("key", effective.key_file)):
+        assert Path(sdk_path).read_text() == material[name]
+        assert Path(sdk_path) != tmp_path / name
+    assert settings.kubeconfig()["users"][0]["user"]["client-key-data"] == base64.b64encode(
+        material["key"].encode()).decode()
+    core.assert_called_once_with(api_client.return_value)
+    assert core.return_value.method_calls == []
+    forbidden.assert_not_called()

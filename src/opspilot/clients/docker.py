@@ -6,6 +6,8 @@ from typing import Any
 
 import docker
 
+from opspilot.configuration import DockerSettings, load_docker_settings
+
 
 # Docker names use ASCII alphanumerics followed by alphanumerics, _, . or -.
 # Bound identifiers even though the Engine does not impose a useful name limit.
@@ -35,8 +37,9 @@ def validate_container_identifier(name_or_id: str) -> None:
 
 
 class DockerClient:
-    def __init__(self) -> None:
-        self._client = docker.from_env()
+    def __init__(self, configuration: DockerSettings | None = None) -> None:
+        settings = configuration if configuration is not None else load_docker_settings()
+        self._client = docker.DockerClient(**settings.client_kwargs())
 
     @_close_after_operation
     def health_check(self) -> bool:

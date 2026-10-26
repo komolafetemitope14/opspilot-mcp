@@ -1,32 +1,19 @@
 """Small synchronous PostgreSQL client configured through the environment."""
 
-import os
 from typing import Any
 
 import psycopg
 import sqlparse
-from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
 
-from opspilot.redaction import registry
+from opspilot.configuration import PostgresConfig, load_postgres_config
 
 
 class PostgresClient:
-    def __init__(self) -> None:
-        load_dotenv(override=False)
-        registry.register_environment(os.environ)
-        names = {
-            "host": "POSTGRES_HOST",
-            "port": "POSTGRES_PORT",
-            "dbname": "POSTGRES_DB",
-            "user": "POSTGRES_USER",
-            "password": "POSTGRES_PASSWORD",
-        }
-        missing = [name for name in names.values() if not os.getenv(name)]
-        if missing:
-            raise ValueError(f"Missing database configuration: {', '.join(missing)}")
-        self._connection_kwargs = {key: os.environ[name] for key, name in names.items()}
+    def __init__(self, configuration: PostgresConfig | None = None) -> None:
+        settings = configuration if configuration is not None else load_postgres_config()
+        self._connection_kwargs = settings.connection_kwargs()
 
     def health_check(self) -> bool:
         """Return True when SELECT 1 succeeds; connection errors propagate."""

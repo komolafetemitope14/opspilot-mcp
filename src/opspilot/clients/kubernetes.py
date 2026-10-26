@@ -5,23 +5,23 @@ from typing import Any
 from kubernetes import client, config
 
 
-from opspilot.redaction import register_kubernetes_credentials
+from opspilot.configuration import (
+    ConfigurationError, KubernetesSettings, load_kubernetes_settings,
+)
+from opspilot.redaction import install_kubernetes_registration
 
 
 class KubernetesClient:
-    def __init__(self) -> None:
-        config.load_kube_config()
-        self._client = client.CoreV1Api()
-        configuration = self._client.api_client.configuration
-        register_kubernetes_credentials(configuration)
-        refresh = configuration.refresh_api_key_hook
-        if refresh is not None:
-            def register_refresh(current):
-                try:
-                    refresh(current)
-                finally:
-                    register_kubernetes_credentials(current)
-            configuration.refresh_api_key_hook = register_refresh
+    def __init__(self, configuration: KubernetesSettings | None = None) -> None:
+        settings = configuration if configuration is not None else load_kubernetes_settings()
+        effective = client.Configuration()
+        try:
+            config.load_kube_config_from_dict(
+                settings.kubeconfig(), client_configuration=effective, persist_config=False)
+        except Exception:
+            raise ConfigurationError("kubeconfig static configuration could not be loaded") from None
+        install_kubernetes_registration(effective)
+        self._client = client.CoreV1Api(client.ApiClient(configuration=effective))
 
     def health_check(self) -> bool:
         """Request core API discovery; configuration and API errors propagate."""

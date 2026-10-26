@@ -2,10 +2,10 @@ from unittest.mock import MagicMock
 
 import psycopg
 import pytest
-from dotenv import load_dotenv
 from psycopg.rows import dict_row
 
 from opspilot.clients import postgres
+from opspilot import configuration
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def config(monkeypatch):
     }
     for name, value in values.items():
         monkeypatch.setenv(name, value)
-    monkeypatch.setattr(postgres, "load_dotenv", MagicMock())
+    monkeypatch.setattr(configuration, "find_dotenv", lambda: "")
     return values
 
 
@@ -40,17 +40,13 @@ def test_configuration_comes_from_environment(config, database):
         host="localhost", port="5432", dbname="test_db",
         user="test_user", password="test_password",
     )
-    postgres.load_dotenv.assert_called_once_with(override=False)
 
 
 def test_dotenv_loading_preserves_environment(monkeypatch, tmp_path, config):
     env_file = tmp_path / ".env"
     env_file.write_text("POSTGRES_HOST=file-host\nPOSTGRES_DB=file-db\n")
     monkeypatch.delenv("POSTGRES_DB")
-    monkeypatch.setattr(
-        postgres, "load_dotenv",
-        lambda **kwargs: load_dotenv(env_file, **kwargs),
-    )
+    monkeypatch.setattr(configuration, "find_dotenv", lambda: str(env_file))
     client = postgres.PostgresClient()
     assert client._connection_kwargs["host"] == "localhost"
     assert client._connection_kwargs["dbname"] == "file-db"
@@ -134,3 +130,16 @@ def test_effective_password_registered_before_connection_failure(config, databas
     connect.side_effect = fail
     with pytest.raises(psycopg.OperationalError):
         postgres.PostgresClient().health_check()
+
+
+def test_configuration_failure_prevents_connection_activation(monkeypatch):
+    error = configuration.ConfigurationError("POSTGRES_PORT is invalid")
+    loader = MagicMock(side_effect=error)
+    connect = MagicMock(side_effect=AssertionError("Must not connect"))
+    monkeypatch.setattr(postgres, "load_postgres_config", loader)
+    monkeypatch.setattr(postgres.psycopg, "connect", connect)
+    with pytest.raises(configuration.ConfigurationError) as caught:
+        postgres.PostgresClient().health_check()
+    assert caught.value is error
+    loader.assert_called_once_with()
+    connect.assert_not_called()

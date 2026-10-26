@@ -123,6 +123,7 @@ def test_delegation_and_results(monkeypatch, name, arguments, method, value):
 
 @pytest.mark.parametrize("query", ["", "DELETE FROM items", "SELECT 1; SELECT 2"])
 def test_invalid_queries_are_tool_errors(monkeypatch, query):
+    monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "true")
     for key in ("HOST", "PORT", "DB", "USER", "PASSWORD"):
         monkeypatch.setenv(f"POSTGRES_{key}", "unused")
     connect = MagicMock()
@@ -345,3 +346,82 @@ def test_docker_mcp_surface_is_exactly_observational():
                 result = await client.call_tool(f"docker_{action}", {})
                 assert result.is_error
     run(check())
+
+
+def test_server_import_and_discovery_do_not_read_backend_settings(monkeypatch):
+    import importlib
+    from opspilot import configuration, server
+    from opspilot.clients import postgres as pg_client, kubernetes as kube_client, docker as docker_client
+    forbidden = MagicMock(side_effect=AssertionError("Discovery must not read configuration"))
+    for module, name in ((configuration, "load_postgres_config"),
+                         (configuration, "load_kubernetes_settings"),
+                         (configuration, "load_docker_settings"),
+                         (pg_client, "load_postgres_config"),
+                         (kube_client, "load_kubernetes_settings"),
+                         (docker_client, "load_docker_settings")):
+        monkeypatch.setattr(module, name, forbidden)
+    importlib.reload(server)
+
+    async def check():
+        async with Client(server.mcp) as client:
+            assert_tools((await client.list_tools()).tools)
+    run(check())
+    forbidden.assert_not_called()
+
+
+def test_fresh_server_import_and_discovery_without_backend_activation():
+    import subprocess
+    import sys
+    import textwrap
+
+    # A separate interpreter ensures server, client and tool modules are fresh.
+    # Only this harness starts a subprocess; credential execution inside it fails.
+    script = textwrap.dedent('''
+        import asyncio
+        import socket
+        import subprocess
+        from unittest.mock import MagicMock
+        import docker
+        import psycopg
+        from kubernetes import client as kube_client, config as kube_config
+        from mcp import Client
+
+        forbidden = MagicMock(side_effect=AssertionError("Discovery activated a backend"))
+        original_socket = socket.socket
+        class OfflineSocket(original_socket):
+            def __init__(self, family=socket.AF_INET, *args, **kwargs):
+                if family in (socket.AF_INET, socket.AF_INET6):
+                    forbidden()
+                super().__init__(family, *args, **kwargs)
+        # Allow the local socketpair used by asyncio's event-loop wakeup.
+        socket.socket = OfflineSocket
+        socket.getaddrinfo = forbidden
+        socket.create_connection = forbidden
+        for name in ("connect", "connect_ex", "bind", "listen", "sendto"):
+            setattr(OfflineSocket, name, forbidden)
+        subprocess.Popen = forbidden
+        psycopg.connect = forbidden
+        docker.DockerClient = docker.APIClient = docker.from_env = forbidden
+        kube_client.Configuration = kube_client.ApiClient = kube_client.CoreV1Api = forbidden
+        kube_config.load_kube_config = kube_config.load_kube_config_from_dict = forbidden
+
+        from opspilot import configuration
+        configuration.load_postgres_config = forbidden
+        configuration.load_docker_settings = forbidden
+        configuration.load_kubernetes_settings = forbidden
+        configuration.find_dotenv = forbidden
+        configuration._read = forbidden
+        from opspilot import server
+
+        async def check():
+            async with Client(server.mcp) as client:
+                tools = (await client.list_tools()).tools
+                assert len(tools) == 17
+                assert {"postgres_health", "docker_health", "kubernetes_health",
+                        "diagnose_cross_system_issues"} <= {tool.name for tool in tools}
+        asyncio.run(check())
+        forbidden.assert_not_called()
+    ''')
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                            text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

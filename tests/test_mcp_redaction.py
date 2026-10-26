@@ -125,3 +125,28 @@ def test_publication_failure_is_safe_on_wire():
             assert "Output sanitization failed" in str(caught.value)
             assert "raw-secret" not in str(caught.value)
     asyncio.run(check())
+
+
+def test_malformed_kubeconfig_is_safe_on_wire_and_stderr(monkeypatch, tmp_path, capsys):
+    import logging
+    from opspilot.redaction import configure_stderr
+    path = tmp_path / "config"
+    path.write_text('users: [\ntoken: synthetic-malformed-wire-secret\n')
+    monkeypatch.setenv("KUBECONFIG", str(path))
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool("kubernetes_health", {})
+            assert result.is_error
+            assert "synthetic-malformed-wire-secret" not in json.dumps(result.model_dump(mode="json"))
+    try:
+        configure_stderr()
+        asyncio.run(check())
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
+    stderr = capsys.readouterr().err
+    assert "synthetic-malformed-wire-secret" not in stderr
+    assert "kubeconfig" in stderr

@@ -1,5 +1,7 @@
 from unittest.mock import Mock, patch, call
 
+import pytest
+
 from mcp.server import MCPServer
 
 from opspilot.tools.diagnostics import register_diagnostic_tools
@@ -321,7 +323,11 @@ def test_registers_cross_system_diagnostic_tool():
 @patch("opspilot.tools.diagnostics.PostgresClient")
 @patch("opspilot.tools.diagnostics.KubernetesDiagnostics")
 @patch("opspilot.tools.diagnostics.KubernetesClient")
+@patch("opspilot.tools.diagnostics.load_kubernetes_settings")
+@patch("opspilot.tools.diagnostics.load_postgres_config")
 def test_diagnose_cross_system_issues(
+    mock_postgres_settings,
+    mock_kubernetes_settings,
     mock_kubernetes_client_class,
     mock_kubernetes_diagnostics_class,
     mock_postgres_client_class,
@@ -425,3 +431,59 @@ def test_diagnose_cross_system_issues(
         postgres=postgres,
     )
     assert result == expected
+
+
+@pytest.mark.parametrize("invalid", ["kubernetes", "postgres"])
+def test_cross_system_validates_both_before_activation(monkeypatch, invalid):
+    from opspilot.tools import diagnostics as module
+    from opspilot.configuration import ConfigurationError
+    timeline = []
+
+    def settings(backend):
+        timeline.append(backend)
+        if backend == invalid:
+            raise ConfigurationError("kubeconfig is invalid" if backend == "kubernetes" else "POSTGRES_PORT is invalid")
+        return object()
+
+    monkeypatch.setattr(module, "load_kubernetes_settings", lambda: settings("kubernetes"))
+    monkeypatch.setattr(module, "load_postgres_config", lambda: settings("postgres"))
+    activate = Mock(side_effect=AssertionError("Must not activate either backend"))
+    monkeypatch.setattr(module, "KubernetesClient", activate)
+    monkeypatch.setattr(module, "PostgresClient", activate)
+    server = MCPServer("test")
+    register_diagnostic_tools(server)
+    with pytest.raises(ConfigurationError):
+        get_tool_function(server, "diagnose_cross_system_issues")("pod")
+    assert timeline == (["kubernetes"] if invalid == "kubernetes" else ["kubernetes", "postgres"])
+    activate.assert_not_called()
+
+
+def test_cross_system_passes_validated_snapshots_before_observation(monkeypatch):
+    from opspilot.tools import diagnostics as module
+    timeline = []
+    kube_settings, pg_settings = object(), object()
+    monkeypatch.setattr(module, "load_kubernetes_settings", lambda: timeline.append("validate kube") or kube_settings)
+    monkeypatch.setattr(module, "load_postgres_config", lambda: timeline.append("validate pg") or pg_settings)
+    kube = Mock()
+    kube.inspect_pod.return_value = make_pod()
+    kube.list_events.return_value = []
+    pg = Mock()
+    pg.health_check.return_value = True
+    pg.list_tables.return_value = []
+
+    def activate_kube(settings):
+        assert timeline == ["validate kube", "validate pg"]
+        assert settings is kube_settings
+        timeline.append("activate kube")
+        return kube
+
+    def activate_pg(settings):
+        assert settings is pg_settings
+        return pg
+
+    monkeypatch.setattr(module, "KubernetesClient", activate_kube)
+    monkeypatch.setattr(module, "PostgresClient", activate_pg)
+    server = MCPServer("test")
+    register_diagnostic_tools(server)
+    get_tool_function(server, "diagnose_cross_system_issues")("pod")
+    assert timeline == ["validate kube", "validate pg", "activate kube"]
