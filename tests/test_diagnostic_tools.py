@@ -201,7 +201,7 @@ def test_diagnose_kubernetes_issues_uses_default_namespace(
         "broken-pod",
         "default",
     )
-    client.list_events.assert_called_once_with("default")
+    client.list_events.assert_called_once_with("default", pod_name="broken-pod")
     diagnostics.diagnose_pod.assert_called_once_with(
         pod,
         events,
@@ -251,7 +251,7 @@ def test_diagnose_kubernetes_issues_uses_requested_namespace(
         "broken-pod",
         "production",
     )
-    client.list_events.assert_called_once_with("production")
+    client.list_events.assert_called_once_with("production", pod_name="broken-pod")
 
 
 @patch("opspilot.tools.diagnostics.KubernetesDiagnostics")
@@ -415,7 +415,7 @@ def test_diagnose_cross_system_issues(
         "broken-pod",
         "default",
     )
-    kubernetes_client.list_events.assert_called_once_with("default")
+    kubernetes_client.list_events.assert_called_once_with("default", pod_name="broken-pod")
     kubernetes_diagnostics.diagnose_pod.assert_called_once_with(
         pod,
         [matching_event],
@@ -487,3 +487,30 @@ def test_cross_system_passes_validated_snapshots_before_observation(monkeypatch)
     register_diagnostic_tools(server)
     get_tool_function(server, "diagnose_cross_system_issues")("pod")
     assert timeline == ["validate kube", "validate pg", "activate kube"]
+
+
+@pytest.mark.parametrize("child", ["kubernetes", "postgres"])
+def test_cross_system_overflow_never_runs_correlation(monkeypatch, child):
+    from mcp.server.mcpserver.exceptions import ToolError
+    from opspilot.limits import ObservationLimitError
+    from opspilot.tools import diagnostics as module
+    monkeypatch.setattr(module, "load_kubernetes_settings", lambda: object())
+    monkeypatch.setattr(module, "load_postgres_config", lambda: object())
+    kube, pg = Mock(), Mock()
+    kube.inspect_pod.return_value = make_pod()
+    kube.list_events.return_value = []
+    pg.health_check.return_value = True
+    pg.list_tables.return_value = []
+    target = kube.list_events if child == "kubernetes" else pg.list_tables
+    target.side_effect = ObservationLimitError()
+    monkeypatch.setattr(module, "KubernetesClient", lambda settings: kube)
+    monkeypatch.setattr(module, "PostgresClient", lambda settings: pg)
+    correlation = Mock()
+    monkeypatch.setattr(module, "CorrelationDiagnostics", correlation)
+    server = MCPServer("test")
+    register_diagnostic_tools(server)
+    with pytest.raises(ToolError, match="^Observation exceeds an OpsPilot safety limit$"):
+        get_tool_function(server, "diagnose_cross_system_issues")("pod")
+    target.assert_called_once()
+    correlation.assert_not_called()
+    correlation.return_value.correlate.assert_not_called()

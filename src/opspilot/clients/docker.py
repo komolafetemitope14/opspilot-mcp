@@ -5,8 +5,14 @@ import re
 from typing import Any
 
 import docker
+from requests.exceptions import Timeout
 
 from opspilot.configuration import DockerSettings, load_docker_settings
+from opspilot.limits import (
+    DOCKER_REQUEST_TIMEOUT_SECONDS, MAX_LIST_ITEMS, DEFAULT_LOG_TAIL,
+    ObservationBudget, ObservationLimitError, ObservationTimeoutError,
+    checked_observation, validate_tail, check_log,
+)
 
 
 # Docker names use ASCII alphanumerics followed by alphanumerics, _, . or -.
@@ -21,6 +27,8 @@ def _close_after_operation(method):
     def wrapped(self, *args, **kwargs):
         try:
             return method(self, *args, **kwargs)
+        except Timeout:
+            raise ObservationTimeoutError() from None
         finally:
             self._client.close()
     return wrapped
@@ -39,7 +47,11 @@ def validate_container_identifier(name_or_id: str) -> None:
 class DockerClient:
     def __init__(self, configuration: DockerSettings | None = None) -> None:
         settings = configuration if configuration is not None else load_docker_settings()
-        self._client = docker.DockerClient(**settings.client_kwargs())
+        # SDK installs this timeout before API version negotiation. It is a
+        # native HTTP timeout, not a total deadline; SSH activation and DNS
+        # retain SDK/OS behavior.
+        self._client = docker.DockerClient(
+            **settings.client_kwargs(), timeout=DOCKER_REQUEST_TIMEOUT_SECONDS)
 
     @_close_after_operation
     def health_check(self) -> bool:
@@ -61,7 +73,30 @@ class DockerClient:
     @_close_after_operation
     def list_containers(self) -> list[dict[str, Any]]:
         """Return curated summaries of running and stopped containers."""
-        return [self._summary(container) for container in self._client.containers.list(all=True)]
+        # The low-level list endpoint returns summaries without N+1 inspections.
+        # docker-py has already buffered the HTTP response before these checks.
+        containers = self._client.api.containers(all=True, limit=MAX_LIST_ITEMS + 1)
+        summaries = []
+        budget = ObservationBudget().start_list()
+        for attrs in containers:
+            if len(summaries) >= MAX_LIST_ITEMS:
+                raise ObservationLimitError()
+            status_text = attrs.get("Status", "")
+            health = next((value for value in ("unhealthy", "healthy", "starting")
+                           if f"({value})" in status_text
+                           or (value == "starting" and "(health: starting)" in status_text)), None)
+            summary = {
+                "id": attrs.get("Id"),
+                "name": (attrs.get("Names") or [None])[0],
+                "image": attrs.get("Image"),
+                "status": attrs.get("State"),
+                "health": health,
+            }
+            if summary["name"] is not None:
+                summary["name"] = summary["name"].removeprefix("/")
+            budget.add_item(summary)
+            summaries.append(summary)
+        return summaries
 
     @_close_after_operation
     def inspect_container(self, name_or_id: str) -> dict[str, Any]:
@@ -69,7 +104,7 @@ class DockerClient:
         validate_container_identifier(name_or_id)
         container = self._client.containers.get(name_or_id)
         state = container.attrs.get("State", {})
-        return {
+        return checked_observation({
             **self._summary(container),
             "running": state.get("Running"),
             "exit_code": state.get("ExitCode"),
@@ -80,13 +115,14 @@ class DockerClient:
                 ]
                 for port, bindings in container.attrs.get("NetworkSettings", {}).get("Ports", {}).items()
             },
-        }
+        })
 
     @_close_after_operation
-    def container_logs(self, name_or_id: str, tail: int = 100) -> str:
+    def container_logs(self, name_or_id: str, tail: int = DEFAULT_LOG_TAIL) -> str:
         """Return the last tail log lines, decoding invalid UTF-8 with replacement."""
-        if isinstance(tail, bool) or not isinstance(tail, int) or tail <= 0:
-            raise ValueError("tail must be a positive integer")
+        validate_tail(tail)
         validate_container_identifier(name_or_id)
         container = self._client.containers.get(name_or_id)
-        return container.logs(tail=tail).decode("utf-8", errors="replace")
+        # Non-following, buffered SDK call. Tail is not a byte bound; this
+        # check cannot prevent docker-py's earlier response buffering.
+        return check_log(container.logs(tail=tail, follow=False).decode("utf-8", errors="replace"))

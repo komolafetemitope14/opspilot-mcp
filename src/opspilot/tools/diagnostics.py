@@ -3,6 +3,7 @@
 from typing import Any
 
 from mcp.server import MCPServer
+from opspilot.limits import bounded_tool_result
 
 from opspilot.clients.docker import DockerClient
 from opspilot.clients.kubernetes import KubernetesClient
@@ -18,6 +19,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
     """Register deterministic diagnostic tools on an MCP server."""
 
     @mcp.tool()
+    @bounded_tool_result
     def diagnose_docker_issues(
         name_or_id: str,
     ) -> dict[str, Any]:
@@ -31,6 +33,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         return diagnostics.diagnose_container(container)
 
     @mcp.tool()
+    @bounded_tool_result
     def diagnose_postgres_issues() -> dict[str, Any]:
         """Diagnose PostgreSQL using health and public-table observations."""
         client = PostgresClient()
@@ -46,6 +49,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         )
 
     @mcp.tool()
+    @bounded_tool_result
     def diagnose_kubernetes_issues(
         name: str,
         namespace: str = "default",
@@ -54,7 +58,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         client = KubernetesClient()
 
         pod = client.inspect_pod(name, namespace)
-        events = client.list_events(namespace)
+        events = client.list_events(namespace, pod_name=name)
 
         pod_events = [
             event
@@ -71,6 +75,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
         )
 
     @mcp.tool()
+    @bounded_tool_result
     def diagnose_cross_system_issues(
         name: str,
         namespace: str = "default",
@@ -84,7 +89,7 @@ def register_diagnostic_tools(mcp: MCPServer) -> None:
             name,
             namespace,
         )
-        events = kubernetes_client.list_events(namespace)
+        events = kubernetes_client.list_events(namespace, pod_name=name)
 
         pod_events = [
             event

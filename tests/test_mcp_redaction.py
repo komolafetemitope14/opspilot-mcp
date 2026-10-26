@@ -150,3 +150,42 @@ def test_malformed_kubeconfig_is_safe_on_wire_and_stderr(monkeypatch, tmp_path, 
     stderr = capsys.readouterr().err
     assert "synthetic-malformed-wire-secret" not in stderr
     assert "kubeconfig" in stderr
+
+
+def test_midstream_database_exception_cleanup_and_safe_publication(monkeypatch):
+    import psycopg
+    from opspilot.clients import postgres as pg_client
+    from opspilot.configuration import PostgresConfig
+    connect = MagicMock()
+    monkeypatch.setattr(pg_client.psycopg, "connect", connect)
+    connection = connect.return_value.__enter__.return_value
+    cursor = connection.cursor.return_value.__enter__.return_value
+    finalized = []
+
+    def stream(only_query):
+        assert only_query == "SELECT n"
+        try:
+            yield {"n": 1}
+            raise psycopg.errors.DataException("synthetic-private-sdk-body endpoint=synthetic-private-host")
+        finally:
+            finalized.append(True)
+
+    cursor.stream = stream
+    settings = PostgresConfig("synthetic-host", "5432", "synthetic-db", "reader", "synthetic-password")
+    actual_client = pg_client.PostgresClient
+    monkeypatch.setattr(postgres, "PostgresClient", lambda: actual_client(settings))
+
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool("postgres_query", {"query": "SELECT n"})
+            assert result.is_error
+            assert result.content[0].text == "Error executing tool postgres_query"
+            wire = json.dumps(result.model_dump(mode="json"))
+            assert "synthetic-private" not in wire
+            assert "synthetic-password" not in wire
+
+    asyncio.run(check())
+    assert finalized == [True]
+    connection.close.assert_called_once()
+    connection.cursor.return_value.__exit__.assert_called_once()
+    connect.return_value.__exit__.assert_called_once()

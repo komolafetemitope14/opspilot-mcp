@@ -58,6 +58,8 @@ def assert_tools(tools):
     tail = by_name["docker_container_logs"].input_schema["properties"]["tail"]
     assert tail["type"] == "integer"
     assert tail["default"] == 100
+    assert tail["minimum"] == 1
+    assert tail["maximum"] == 1000
     for name in ("kubernetes_list_pods", "kubernetes_list_events"):
         schema = by_name[name].input_schema
         assert schema["type"] == "object"
@@ -79,6 +81,8 @@ def assert_tools(tools):
     tail = by_name["kubernetes_pod_logs"].input_schema["properties"]["tail"]
     assert tail["type"] == "integer"
     assert tail["default"] == 100
+    assert tail["minimum"] == 1
+    assert tail["maximum"] == 1000
 
 
 def test_discovery_without_database_configuration(monkeypatch):
@@ -425,3 +429,49 @@ def test_fresh_server_import_and_discovery_without_backend_activation():
     result = subprocess.run([sys.executable, "-c", script], capture_output=True,
                             text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("tool,arguments", [
+    ("docker_container_logs", {"name_or_id": "web", "tail": 1001}),
+    ("kubernetes_pod_logs", {"name": "web", "tail": True}),
+])
+def test_tail_policy_rejected_before_backend_activation(monkeypatch, tool, arguments):
+    forbidden = MagicMock(side_effect=AssertionError("Must not activate"))
+    monkeypatch.setattr(docker, "DockerClient", forbidden)
+    monkeypatch.setattr(kubernetes, "KubernetesClient", forbidden)
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool(tool, arguments)
+            assert result.is_error
+    run(check())
+    forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", ["limit", "timeout"])
+def test_safe_observation_errors_on_wire(monkeypatch, failure):
+    from opspilot.limits import ObservationLimitError, ObservationTimeoutError
+    factory = MagicMock()
+    factory.return_value.list_containers.side_effect = (
+        ObservationLimitError() if failure == "limit" else ObservationTimeoutError())
+    monkeypatch.setattr(docker, "DockerClient", factory)
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool("docker_list_containers", {})
+            assert result.is_error
+            expected = "OpsPilot safety limit" if failure == "limit" else "observation timed out"
+            assert expected in result.content[0].text
+    run(check())
+
+
+def test_pre_return_observation_limit_on_wire(monkeypatch):
+    from opspilot.limits import MAX_VALUE_BYTES
+    factory = MagicMock()
+    factory.return_value.inspect_container.return_value = {"name": "s" * (MAX_VALUE_BYTES + 1)}
+    monkeypatch.setattr(docker, "DockerClient", factory)
+    async def check():
+        async with Client(mcp) as client:
+            result = await client.call_tool("docker_inspect_container", {"name_or_id": "web"})
+            assert result.is_error
+            assert "OpsPilot safety limit" in result.content[0].text
+            assert "ssssssss" not in result.content[0].text
+    run(check())

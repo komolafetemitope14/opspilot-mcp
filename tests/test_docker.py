@@ -36,7 +36,7 @@ def container():
 def test_construction_uses_validated_settings(engine):
     from_env, _ = engine
     docker.DockerClient()
-    from_env.assert_called_once_with(base_url="unix:///tmp/test.sock")
+    from_env.assert_called_once_with(base_url="unix:///tmp/test.sock", timeout=10)
 
 
 def test_construction_errors_propagate(engine):
@@ -67,9 +67,12 @@ def test_list_containers_includes_running_and_stopped(engine, container):
     stopped.name = "worker"
     stopped.status = "exited"
     stopped.attrs = {"Image": "sha256:worker", "State": {"Running": False}}
-    sdk.containers.list.return_value = [container, stopped]
+    sdk.api.containers.return_value = [
+        {"Id": "abc123", "Names": ["/web"], "Image": "nginx:latest", "State": "running", "Status": "Up (healthy)"},
+        {"Id": "def456", "Names": ["/worker"], "Image": "sha256:worker", "State": "exited"},
+    ]
     result = docker.DockerClient().list_containers()
-    sdk.containers.list.assert_called_once_with(all=True)
+    sdk.api.containers.assert_called_once_with(all=True, limit=501)
     assert result == [
         {"id": "abc123", "name": "web", "image": "nginx:latest",
          "status": "running", "health": "healthy"},
@@ -104,7 +107,7 @@ def test_logs_decode_bytes_and_limit_tail(engine, container, kwargs, expected_ta
     container.logs.return_value = "ready café\n".encode("utf-8")
     assert docker.DockerClient().container_logs("web", **kwargs) == "ready café\n"
     sdk.containers.get.assert_called_once_with("web")
-    container.logs.assert_called_once_with(tail=expected_tail)
+    container.logs.assert_called_once_with(tail=expected_tail, follow=False)
 
 
 def test_logs_replace_invalid_utf8(engine, container):
@@ -114,11 +117,11 @@ def test_logs_replace_invalid_utf8(engine, container):
     assert docker.DockerClient().container_logs("abc123") == "log\ufffd"
 
 
-@pytest.mark.parametrize("tail", [0, -1, 1.5, "100", None, True, False])
+@pytest.mark.parametrize("tail", [0, -1, 1001, 1.5, "100", None, True, False])
 def test_invalid_tail_rejected_before_docker_call(engine, tail):
     _, sdk = engine
     client = docker.DockerClient()
-    with pytest.raises(ValueError, match="positive integer"):
+    with pytest.raises(ValueError, match="integer between 1 and 1000"):
         client.container_logs("web", tail=tail)
     assert sdk.mock_calls == [call.close()]
 
@@ -135,7 +138,7 @@ def test_lookup_errors_propagate(engine, method):
 def test_api_errors_propagate(engine, container, method):
     _, sdk = engine
     sdk.containers.get.return_value = container
-    sdk.containers.list.side_effect = docker_sdk.errors.APIError("failed")
+    sdk.api.containers.side_effect = docker_sdk.errors.APIError("failed")
     container.logs.side_effect = docker_sdk.errors.APIError("failed")
     with pytest.raises(docker_sdk.errors.APIError, match="failed"):
         if method == "list_containers":
@@ -176,12 +179,12 @@ def test_invalid_identifiers_never_reach_sdk_lookup(engine, identifier, method):
 @pytest.mark.parametrize("fails", [False, True])
 def test_operation_closes_sdk_and_only_observes(engine, container, method, fails):
     _, sdk = engine
-    sdk.containers.list.return_value = [container]
+    sdk.api.containers.return_value = [{"Id": "abc123", "Names": ["/web"], "Image": "nginx:latest", "State": "running"}]
     sdk.containers.get.return_value = container
     container.logs.return_value = b"ready"
     operation = {
         "health_check": sdk.ping,
-        "list_containers": sdk.containers.list,
+        "list_containers": sdk.api.containers,
         "inspect_container": sdk.containers.get,
         "container_logs": container.logs,
     }[method]
@@ -195,12 +198,12 @@ def test_operation_closes_sdk_and_only_observes(engine, container, method, fails
         getattr(docker.DockerClient(), method)(*args)
     expected = {
         "health_check": [call.ping(), call.close()],
-        "list_containers": [call.containers.list(all=True), call.close()],
+        "list_containers": [call.api.containers(all=True, limit=501), call.close()],
         "inspect_container": [call.containers.get("web"), call.close()],
-        "container_logs": [call.containers.get("web"), call.containers.get().logs(tail=100), call.close()],
+        "container_logs": [call.containers.get("web"), call.containers.get().logs(tail=100, follow=False), call.close()],
     }[method]
     assert sdk.mock_calls == expected
-    assert container.method_calls == ([call.logs(tail=100)] if method == "container_logs" else [])
+    assert container.method_calls == ([call.logs(tail=100, follow=False)] if method == "container_logs" else [])
 
 
 def test_sensitive_inspection_fields_are_projected_out(engine, container):
@@ -216,7 +219,7 @@ def test_sensitive_inspection_fields_are_projected_out(engine, container):
     container.attrs["NetworkSettings"]["Ports"]["80/tcp"][0]["extra"] = secret
     container.attrs["NetworkSettings"]["Ports"]["443/tcp"] = None
     sdk.containers.get.return_value = container
-    sdk.containers.list.return_value = [container]
+    sdk.api.containers.return_value = [{"Id": "abc123", "Names": ["/web"], "Image": "nginx:latest", "State": "running"}]
     listing = docker.DockerClient().list_containers()
     inspection = docker.DockerClient().inspect_container("web")
     assert secret not in json.dumps([listing, inspection])
@@ -267,3 +270,90 @@ def test_configuration_failure_prevents_client_and_transport_construction(monkey
         docker.DockerClient()
     loader.assert_called_once_with()
     forbidden.assert_not_called()
+
+
+@pytest.mark.parametrize('count', [500, 501])
+def test_list_limit_without_inspect(engine, count):
+    from opspilot.limits import ObservationLimitError
+    _, sdk = engine
+    sdk.api.containers.return_value = [{'Id': str(n), 'Names': ['/web'], 'State': 'running'} for n in range(count)]
+    if count == 500:
+        assert len(docker.DockerClient().list_containers()) == count
+    else:
+        with pytest.raises(ObservationLimitError):
+            docker.DockerClient().list_containers()
+    sdk.containers.get.assert_not_called()
+    sdk.api.inspect_container.assert_not_called()
+    sdk.api.containers.assert_called_once_with(all=True, limit=501)
+    sdk.close.assert_called_once()
+
+
+@pytest.mark.parametrize('tail', [1, 1000])
+def test_log_tail_exact_boundaries(engine, container, tail):
+    _, sdk = engine
+    sdk.containers.get.return_value = container
+    container.logs.return_value = b'ok'
+    assert docker.DockerClient().container_logs('web', tail) == 'ok'
+    container.logs.assert_called_once_with(tail=tail, follow=False)
+
+
+@pytest.mark.parametrize('extra', [0, 1])
+def test_log_byte_limit_and_close(engine, container, extra):
+    from opspilot.limits import MAX_LOG_BYTES, ObservationLimitError
+    _, sdk = engine
+    sdk.containers.get.return_value = container
+    container.logs.return_value = ('é' * (MAX_LOG_BYTES // 2) + 'a' * extra).encode()
+    if extra:
+        with pytest.raises(ObservationLimitError):
+            docker.DockerClient().container_logs('web')
+    else:
+        assert len(docker.DockerClient().container_logs('web')) == MAX_LOG_BYTES // 2
+    sdk.close.assert_called_once()
+
+
+def test_timeout_is_active_inside_real_sdk_version_negotiation(monkeypatch):
+    observed = []
+    def version(api):
+        observed.append(api.timeout)
+        return '1.44'
+    monkeypatch.setattr(docker_sdk.api.client.APIClient, '_retrieve_server_version', version)
+    monkeypatch.setattr(docker, 'load_docker_settings', lambda: docker.DockerSettings('unix:///tmp/synthetic.sock'))
+    instance = docker.DockerClient()
+    try:
+        assert observed == [10]
+    finally:
+        instance._client.close()
+
+
+@pytest.mark.parametrize('status,health', [('Up (healthy)', 'healthy'), ('Up (unhealthy)', 'unhealthy'), ('Up (health: starting)', 'starting'), ('Exited (1)', None)])
+def test_list_summary_health_without_inspection(engine, status, health):
+    _, sdk = engine
+    sdk.api.containers.return_value = [{'Id': 'a', 'Names': ['/web'], 'State': 'running', 'Status': status}]
+    assert docker.DockerClient().list_containers()[0]['health'] == health
+    sdk.containers.get.assert_not_called()
+
+
+def test_docker_native_timeout_safe_and_closes(engine):
+    from requests.exceptions import ReadTimeout
+    from opspilot.limits import ObservationTimeoutError
+    _, sdk = engine
+    sdk.ping.side_effect = ReadTimeout('private endpoint')
+    with pytest.raises(ObservationTimeoutError, match='^Infrastructure observation timed out$'):
+        docker.DockerClient().health_check()
+    sdk.close.assert_called_once()
+
+
+def test_list_incremental_budget_matches_whole_result(engine, monkeypatch):
+    from opspilot.limits import ObservationBudget
+    budget = ObservationBudget()
+    monkeypatch.setattr(docker, "ObservationBudget", lambda: budget)
+    _, sdk = engine
+    sdk.api.containers.return_value = [
+        {"Id": "one", "Names": ["/web"], "Image": "image", "State": "running"},
+        {"Id": "two", "Names": ["/worker"], "Image": "image", "State": "exited"},
+    ]
+    result = docker.DockerClient().list_containers()
+    whole = ObservationBudget()
+    whole.add(result)
+    assert budget.used == whole.used
+    sdk.close.assert_called_once()

@@ -2,6 +2,8 @@
 
 from typing import Any
 
+from opspilot.limits import MAX_DIAGNOSTIC_FINDINGS, ObservationLimitError, checked_observation
+
 
 class KubernetesDiagnostics:
     """Analyze Kubernetes observations and produce structured findings."""
@@ -12,6 +14,9 @@ class KubernetesDiagnostics:
         events: list[dict[str, Any]],
     ) -> dict[str, Any]:
         """Diagnose one Pod from its summary and related Kubernetes events."""
+        # Bound evidence as well as findings: image-pull evidence is grouped
+        # into one finding and must not bypass the count limit.
+        checked_observation(events)
         findings: list[dict[str, Any]] = []
 
         if pod["phase"] != "Running":
@@ -70,6 +75,8 @@ class KubernetesDiagnostics:
 
             if "ImagePullBackOff" in message or "ErrImagePull" in message:
                 if message not in image_pull_evidence:
+                    if len(image_pull_evidence) >= MAX_DIAGNOSTIC_FINDINGS:
+                        raise ObservationLimitError()
                     image_pull_evidence.append(message)
 
             elif "CrashLoopBackOff" in message:
@@ -115,6 +122,11 @@ class KubernetesDiagnostics:
                     ),
                 }
             )
+
+        if (len(findings) > MAX_DIAGNOSTIC_FINDINGS
+                or sum(len(finding["evidence"]) for finding in findings) > MAX_DIAGNOSTIC_FINDINGS):
+            raise ObservationLimitError()
+        checked_observation(findings)
 
         severities = {
             finding["severity"]

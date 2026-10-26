@@ -201,3 +201,21 @@ def test_multiple_image_pull_events_produce_one_finding():
         "Error: ErrImagePull",
         "Error: ImagePullBackOff",
     ]
+
+
+def test_findings_exact_cap_and_overflow():
+    import pytest
+    from opspilot.limits import ObservationLimitError
+    diagnostics = KubernetesDiagnostics()
+    events = [make_event(event_type='Warning', message='warning')] * 100
+    assert len(diagnostics.diagnose_pod(make_pod(), events)['findings']) == 100
+    with pytest.raises(ObservationLimitError):
+        diagnostics.diagnose_pod(make_pod(ready=False), events)
+
+
+def test_grouped_evidence_cannot_bypass_bound():
+    import pytest
+    from opspilot.limits import ObservationLimitError
+    events = [make_event(message=f'ImagePullBackOff {n}') for n in range(101)]
+    with pytest.raises(ObservationLimitError):
+        KubernetesDiagnostics().diagnose_pod(make_pod(), events)
