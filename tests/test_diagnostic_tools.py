@@ -1,4 +1,4 @@
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 
 from mcp.server import MCPServer
 
@@ -98,6 +98,7 @@ def test_diagnose_docker_issues(
     result = tool("broken-container")
 
     client.inspect_container.assert_called_once_with("broken-container")
+    assert client.method_calls == [call.inspect_container("broken-container")]
     diagnostics.diagnose_container.assert_called_once_with(container)
     assert result == expected
 

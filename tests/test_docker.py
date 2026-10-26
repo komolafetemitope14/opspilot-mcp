@@ -1,5 +1,5 @@
 import json
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 import docker as docker_sdk
 import pytest
@@ -119,7 +119,7 @@ def test_invalid_tail_rejected_before_docker_call(engine, tail):
     client = docker.DockerClient()
     with pytest.raises(ValueError, match="positive integer"):
         client.container_logs("web", tail=tail)
-    assert sdk.mock_calls == []
+    assert sdk.mock_calls == [call.close()]
 
 
 @pytest.mark.parametrize("method", ["inspect_container", "container_logs"])
@@ -141,3 +141,111 @@ def test_api_errors_propagate(engine, container, method):
             docker.DockerClient().list_containers()
         else:
             docker.DockerClient().container_logs("web")
+
+
+@pytest.mark.parametrize("identifier", [
+    "web", "a", "web..other", "Web_01.test-service", "0", "abc123", "a" * 64, "a" * 255,
+])
+@pytest.mark.parametrize("method", ["inspect_container", "container_logs"])
+def test_valid_identifiers_reach_lookup_unchanged(engine, container, identifier, method):
+    _, sdk = engine
+    sdk.containers.get.return_value = container
+    container.logs.return_value = b"ready"
+    getattr(docker.DockerClient(), method)(identifier)
+    sdk.containers.get.assert_called_once_with(identifier)
+    sdk.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("identifier", [
+    "", " ", " web", "web ", "/web", "web/other", r"web\other",
+    ".", "..", "../web", "web/../other", "web%2fother",
+    "web?tail=all", "web#fragment", "web:latest", "web\n", "web\r",
+    "web\x00", "web\t", "web\x7f", "wéb", "-web", "_web", ".web",
+    "a" * 256, None, 123, True,
+])
+@pytest.mark.parametrize("method", ["inspect_container", "container_logs"])
+def test_invalid_identifiers_never_reach_sdk_lookup(engine, identifier, method):
+    _, sdk = engine
+    with pytest.raises(ValueError, match="bare container name or ID"):
+        getattr(docker.DockerClient(), method)(identifier)
+    assert sdk.mock_calls == [call.close()]
+
+
+@pytest.mark.parametrize("method", ["health_check", "list_containers", "inspect_container", "container_logs"])
+@pytest.mark.parametrize("fails", [False, True])
+def test_operation_closes_sdk_and_only_observes(engine, container, method, fails):
+    _, sdk = engine
+    sdk.containers.list.return_value = [container]
+    sdk.containers.get.return_value = container
+    container.logs.return_value = b"ready"
+    operation = {
+        "health_check": sdk.ping,
+        "list_containers": sdk.containers.list,
+        "inspect_container": sdk.containers.get,
+        "container_logs": container.logs,
+    }[method]
+    if fails:
+        operation.side_effect = docker_sdk.errors.APIError("failed")
+    args = ("web",) if method in ("inspect_container", "container_logs") else ()
+    if fails:
+        with pytest.raises(docker_sdk.errors.APIError):
+            getattr(docker.DockerClient(), method)(*args)
+    else:
+        getattr(docker.DockerClient(), method)(*args)
+    expected = {
+        "health_check": [call.ping(), call.close()],
+        "list_containers": [call.containers.list(all=True), call.close()],
+        "inspect_container": [call.containers.get("web"), call.close()],
+        "container_logs": [call.containers.get("web"), call.containers.get().logs(tail=100), call.close()],
+    }[method]
+    assert sdk.mock_calls == expected
+    assert container.method_calls == ([call.logs(tail=100)] if method == "container_logs" else [])
+
+
+def test_sensitive_inspection_fields_are_projected_out(engine, container):
+    _, sdk = engine
+    secret = "sensitive-sentinel"
+    container.attrs["Config"].update({
+        "Env": [secret], "Labels": {"token": secret}, "Cmd": [secret],
+        "Entrypoint": [secret], "Healthcheck": {"Test": [secret]},
+    })
+    container.attrs.update({"HostConfig": {"Binds": [secret]}, "raw": secret})
+    container.attrs["Mounts"] = [{"Source": secret}]
+    container.attrs["State"]["Health"]["Log"] = [{"Output": secret}]
+    container.attrs["NetworkSettings"]["Ports"]["80/tcp"][0]["extra"] = secret
+    container.attrs["NetworkSettings"]["Ports"]["443/tcp"] = None
+    sdk.containers.get.return_value = container
+    sdk.containers.list.return_value = [container]
+    listing = docker.DockerClient().list_containers()
+    inspection = docker.DockerClient().inspect_container("web")
+    assert secret not in json.dumps([listing, inspection])
+    assert set(listing[0]) == {"id", "name", "image", "status", "health"}
+    assert set(inspection) == {"id", "name", "image", "status", "health", "running", "exit_code", "ports"}
+    assert inspection["ports"] == {
+        "80/tcp": [{"HostIp": "127.0.0.1", "HostPort": "8080"}], "443/tcp": None,
+    }
+    inspection["ports"]["80/tcp"][0]["HostPort"] = "changed"
+    assert container.attrs["NetworkSettings"]["Ports"]["80/tcp"][0]["HostPort"] == "8080"
+
+
+def test_projection_exception_still_closes_sdk(engine, container):
+    _, sdk = engine
+    sdk.containers.get.return_value = container
+    container.attrs["NetworkSettings"]["Ports"] = None
+    with pytest.raises(AttributeError):
+        docker.DockerClient().inspect_container("web")
+    sdk.close.assert_called_once_with()
+
+
+def test_diagnostic_tool_sdk_calls_are_inspection_only(engine, container):
+    from mcp.server import MCPServer
+    from opspilot.tools.diagnostics import register_diagnostic_tools
+
+    _, sdk = engine
+    sdk.containers.get.return_value = container
+    server = MCPServer("test")
+    register_diagnostic_tools(server)
+    result = server._tool_manager._tools["diagnose_docker_issues"].fn("web")
+    assert result["status"] == "healthy"
+    assert sdk.mock_calls == [call.containers.get("web"), call.close()]
+    assert container.method_calls == []

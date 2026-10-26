@@ -330,3 +330,18 @@ def test_kubernetes_exceptions_are_tool_errors(monkeypatch, name, arguments, met
     if not construction_error:
         getattr(factory.return_value, method).assert_called_once_with(*expected_args)
         assert len(factory.return_value.method_calls) == 1
+
+
+def test_docker_mcp_surface_is_exactly_observational():
+    async def check():
+        async with Client(mcp) as client:
+            names = {tool.name for tool in (await client.list_tools()).tools}
+            assert {name for name in names if "docker" in name} == {
+                "docker_health", "docker_list_containers", "docker_inspect_container",
+                "docker_container_logs", "diagnose_docker_issues",
+            }
+            for action in ("create", "start", "stop", "restart", "kill", "remove",
+                           "exec", "attach", "update", "build"):
+                result = await client.call_tool(f"docker_{action}", {})
+                assert result.is_error
+    run(check())

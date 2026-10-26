@@ -145,3 +145,18 @@ def test_multiple_findings_use_highest_severity():
         "container_nonzero_exit",
         "container_unhealthy",
     }
+
+
+def test_diagnostics_do_not_echo_unapproved_configuration():
+    import json
+
+    container = make_container(running=False, exit_code=7, health="unhealthy")
+    container.update({
+        "Env": ["sensitive-sentinel"], "Labels": {"secret": "sensitive-sentinel"},
+        "Mounts": ["sensitive-sentinel"], "Cmd": ["sensitive-sentinel"],
+        "Healthcheck": {"Test": ["sensitive-sentinel"]},
+        "attrs": {"Config": {"Env": ["sensitive-sentinel"]}},
+    })
+    result = DockerDiagnostics().diagnose_container(container)
+    assert "sensitive-sentinel" not in json.dumps(result)
+    assert set(result) == {"status", "system", "resource", "findings"}
