@@ -183,3 +183,23 @@ def test_refresh_registration_stays_installed_when_sdk_clears_hook():
     wrapper(configuration)
     wrapper(configuration)
     assert configuration.refresh_api_key_hook is wrapper
+
+
+@pytest.mark.parametrize("failure", ["format", "write", "flush"])
+def test_owned_handler_never_dumps_raw_diagnostics(monkeypatch, capsys, failure):
+    import io
+    from opspilot.redaction import SafeStderrHandler
+    stream = io.StringIO()
+    handler = SafeStderrHandler(stream)
+    handler.setFormatter(RedactingFormatter())
+    def broken(*args, **kwargs):
+        raise ValueError("private-handler-exception")
+    monkeypatch.setattr(logging, "raiseExceptions", True)
+    monkeypatch.setattr(handler if failure == "format" else stream, failure, broken)
+    record = logging.LogRecord("test", logging.ERROR, "", 0, "password=%s", ("private-raw-args",), None)
+    handler.handle(record)
+    captured = capsys.readouterr()
+    assert captured.err == captured.out == ""
+    assert "Logging error" not in stream.getvalue()
+    assert "Traceback" not in stream.getvalue()
+    assert "private-" not in stream.getvalue()

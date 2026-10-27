@@ -154,9 +154,16 @@ class RedactingFormatter(logging.Formatter):
             return "Output sanitization failed"
 
 
+class SafeStderrHandler(logging.StreamHandler):
+    """Drop handler failures without logging's raw diagnostic fallback."""
+
+    def handleError(self, record):
+        pass
+
+
 def configure_stderr():
     """Own the server's default stderr handler, without modifying SDK code."""
-    handler = logging.StreamHandler()
+    handler = SafeStderrHandler()
     handler.setFormatter(RedactingFormatter())
     root = logging.getLogger()
     root.handlers.clear()

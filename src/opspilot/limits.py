@@ -9,6 +9,7 @@ from functools import wraps
 from typing import Annotated
 
 from pydantic import Field
+from mcp.server.mcpserver.exceptions import ToolError
 
 POSTGRES_CONNECT_TIMEOUT_SECONDS = 5
 POSTGRES_STATEMENT_TIMEOUT_MS = 10_000
@@ -40,6 +41,17 @@ class ObservationLimitError(ObservationError):
 class ObservationTimeoutError(ObservationError):
     def __init__(self):
         super().__init__("Infrastructure observation timed out")
+
+
+class ObservationToolError(ToolError):
+    """Retain only a static audit category across MCP error conversion."""
+
+    def __init__(self, error):
+        super().__init__(str(error))
+        self.audit_category = (
+            "timeout" if isinstance(error, ObservationTimeoutError) else
+            "limit" if isinstance(error, ObservationLimitError) else "observation"
+        )
 
 
 def validate_positive_integer(value, maximum):
@@ -130,7 +142,6 @@ def bounded_tool_result(function=None, *, logs=False):
     def decorate(fn):
         @wraps(fn)
         def wrapped(*args, **kwargs):
-            from mcp.server.mcpserver.exceptions import ToolError
             try:
                 result = fn(*args, **kwargs)
                 if logs:
@@ -138,6 +149,6 @@ def bounded_tool_result(function=None, *, logs=False):
                     return ObservationBudget(value_maximum=MAX_LOG_BYTES).add(result)
                 return checked_observation(result)
             except ObservationError as exc:
-                raise ToolError(str(exc)) from None
+                raise ObservationToolError(exc) from None
         return wrapped
     return decorate(function) if function is not None else decorate
