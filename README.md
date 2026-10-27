@@ -1,255 +1,68 @@
 # OpsPilot MCP
 
-OpsPilot MCP is a Python-based local infrastructure MCP server that allows AI assistants to inspect PostgreSQL, Docker, and Kubernetes through the Model Context Protocol (MCP).
+OpsPilot MCP is a Python local infrastructure MCP server for inspecting PostgreSQL, Docker, and Kubernetes. It exposes curated observations, deterministic diagnostics, and Kubernetes/PostgreSQL cross-system correlation to AI assistants through the Model Context Protocol.
 
-This README is a living project progress document, tracking implemented capabilities, verification results, and upcoming milestones.
+The supported deployment boundary is **trusted-local stdio**: a trusted local MCP client launches OpsPilot with shared infrastructure credentials. The project does not provide remote multi-user production security. An LLM is not required inside OpsPilot; an external AI client can reason over its structured results.
 
-## Project Goal
-
-Enable AI assistants to answer infrastructure questions such as:
-
-- Is PostgreSQL healthy?
-- What tables exist?
-- What Docker containers are running?
-- Show container logs.
-- What Kubernetes pods are running?
-- Why is my application failing?
+Milestones 1–5 (clients, MCP tools, and diagnostics) are complete. Milestone 6 security hardening is implemented through Slice 9; Slice 10 documents the implementation and separately completed live verification below. Remaining security and diagnostic work is listed under limitations.
 
 ## Architecture
 
-The MCP server, PostgreSQL tools, read-only Docker and Kubernetes inspection tools, and deterministic PostgreSQL, Kubernetes, Docker, and cross-system diagnostics are implemented:
-
 ```text
 AI / MCP Client
-       |
-       | MCP
-       v
+    |
+    | MCP / stdio
+    v
 OpsPilot MCP Server
-       |
-       +---- PostgreSQL (implemented)
-       +---- Docker (implemented, read-only)
-       +---- Kubernetes (implemented, read-only)
-       +---- diagnostics/ (deterministic per-system diagnostics and cross-system correlation)
+    |
+    v
+ tools/  ----------------------> diagnostics/
+    |                           deterministic interpretation
+    v                                  |
+ clients/                              v
+    |                           cross-system correlation
+    v                           (Kubernetes + PostgreSQL)
+PostgreSQL / Docker / Kubernetes
 ```
 
-## Current Status
+`clients/` collect infrastructure facts and project them into curated observations. `diagnostics/` interpret normalized observations deterministically; correlation consumes normalized child diagnoses. `tools/` orchestrate these components and expose operations through MCP. Publication passes centralized redaction, with metadata-only completion auditing around tool calls.
 
-**Milestone 1 — PostgreSQL Client: COMPLETE**
+The stack uses Python 3.11+, Psycopg 3, the Docker and Kubernetes Python SDKs, the MCP Python SDK, and pytest. Docker Compose supplies the local PostgreSQL 17 database; kind is the local Kubernetes demo environment.
 
-Implemented and verified:
+## MCP tools
 
-- Synchronous `PostgresClient` using Psycopg 3.
-- `health_check()` using `SELECT 1`.
-- `list_tables()` for public-schema base tables.
-- `execute_select()` for a single SELECT query.
-- Dictionary query results.
-- Rejection of non-SELECT queries.
-- Rejection of multiple statements.
-- PostgreSQL read-only transactions for `execute_select()` queries, including those used by `list_tables()`.
-- Environment configuration using `.env`.
-- Credentials excluded from Git through the ignored `.env` file.
-- Integration verification against the real PostgreSQL 17 Docker container.
+The current surface is exactly **17 tools**. Docker and Kubernetes tools are observational; there are no mutation or remediation tools.
 
-**Milestone 2 — MCP server and PostgreSQL MCP tools: COMPLETE**
-
-The implemented MCP server exposes three PostgreSQL tools:
-
-- `postgres_health` — checks PostgreSQL connectivity.
-- `postgres_list_tables` — lists public-schema base tables.
-- `postgres_query` — executes one SELECT statement using the existing read-only PostgreSQL client path and returns dictionary results.
-
-Verification completed:
-
-- At Milestone 2 completion, 38 pytest tests passed, covering PostgreSQL client behavior and MCP tools.
-- MCP tool discovery was tested.
-- stdio MCP server/client communication was tested.
-- Manual end-to-end verification against the real PostgreSQL Docker container succeeded: `postgres_health` returned `true`, `postgres_list_tables` returned `["services"]`, and `postgres_query` returned the three existing service records.
-- A DELETE sent through `postgres_query` was rejected and returned an MCP tool error.
-
-**Milestone 3 — Docker Inspection Tools: COMPLETE**
-
-The implemented MCP server exposes four read-only Docker tools:
-
-- `docker_health` — checks communication with the Docker Engine.
-- `docker_list_containers` — lists running and stopped containers using curated JSON-friendly data.
-- `docker_inspect_container` — returns selected operational details, including status, health, running state, exit code, and ports.
-- `docker_container_logs` — returns a bounded number of recent container log lines.
-
-Docker operations are currently read-only. OpsPilot does not start, stop, restart, remove, or create containers.
-
-Verification completed:
-
-- 83 pytest tests pass across the PostgreSQL, Docker, and MCP functionality.
-- 23 DockerClient unit tests were added.
-- DockerClient was manually verified against the real Docker Desktop engine.
-- `docker_health` returned `true`.
-- Container listing found both running and exited containers.
-- Inspection of `opspilot-postgres` returned healthy/running state and port information.
-- Recent PostgreSQL container logs were retrieved successfully.
-- Manual MCP-to-Docker end-to-end verification succeeded.
-- Invalid `tail=0` produced an MCP tool error.
-- Inspecting a nonexistent container produced an MCP tool error.
-
-Real-container verification was performed separately from the automated tests. Docker Compose currently provides the development database. Cross-system diagnostics are documented under Milestone 5 below.
-
-**Milestone 4 — Kubernetes Inspection Tools: COMPLETE**
-
-Implemented and verified:
-
-- Synchronous `KubernetesClient` using the Kubernetes Python client and kubeconfig/current context.
-- Kubernetes API health check and namespace listing.
-- Pod listing across all namespaces or a selected namespace.
-- Pod inspection with selected operational details.
-- Pod log retrieval with `tail` validated as a positive integer.
-- Kubernetes Event listing across all namespaces or a selected namespace.
-- Curated JSON-friendly results rather than raw SDK objects.
-- Read-only inspection design; Kubernetes write operations and remediation are not implemented.
-
-The implemented MCP server exposes six read-only Kubernetes tools:
-
-- `kubernetes_health` — checks communication with the Kubernetes API.
-- `kubernetes_list_namespaces` — lists namespace names.
-- `kubernetes_list_pods` — lists Pod summaries across all namespaces or a selected namespace.
-- `kubernetes_inspect_pod` — returns selected operational details for a named Pod.
-- `kubernetes_pod_logs` — retrieves recent Pod log lines with positive `tail` validation.
-- `kubernetes_list_events` — returns curated Event summaries across all namespaces or a selected namespace.
-
-At Milestone 4 completion, OpsPilot exposed 13 MCP inspection tools: 3 PostgreSQL, 4 Docker, and 6 Kubernetes tools.
-
-Verification completed:
-
-- 53 Kubernetes tests passed.
-- 65 MCP tests passed.
-- 164 tests passed in the full suite.
-- Real Kubernetes integration was tested against the local kind cluster named `opspilot`, using the `kind-opspilot` context.
-- Real end-to-end MCP -> OpsPilot -> Kubernetes calls succeeded for all six Kubernetes tools.
-- A diagnostic event experiment used a deliberately invalid nginx image to produce `ImagePullBackOff`. OpsPilot successfully retrieved the resulting Kubernetes Events, and the temporary failing Pod was deleted afterward. Events are transient diagnostic data, not permanent records.
-
-Real-cluster verification was performed separately from the automated tests.
-
-**Milestone 5 — Cross-System Diagnostics: COMPLETE**
-
-The PostgreSQL, Kubernetes, Docker, and cross-system diagnostics are complete and verified. OpsPilot now exposes 17 MCP tools total: 3 PostgreSQL inspection tools, 4 Docker inspection tools, 6 Kubernetes inspection tools, and 4 diagnostic tools:
-
-- `diagnose_postgres_issues` — collects observations through `PostgresClient.health_check()` and `PostgresClient.list_tables()` and passes them to the deterministic `PostgresDiagnostics` engine in `src/opspilot/diagnostics/postgres.py`.
-- `diagnose_kubernetes_issues` — analyzes a named Pod's state and related Kubernetes Events using the deterministic `KubernetesDiagnostics` engine under `src/opspilot/diagnostics/`.
-- `diagnose_docker_issues` — collects curated container state through `DockerClient` and passes it to the deterministic `DockerDiagnostics` engine in `src/opspilot/diagnostics/docker.py`.
-- `diagnose_cross_system_issues(name, namespace="default")` — diagnoses a named Kubernetes Pod and PostgreSQL, then passes their normalized diagnostic results to `CorrelationDiagnostics` in `src/opspilot/diagnostics/correlation.py`.
-
-Structured diagnostic results include:
-
-- Overall `status` (`healthy`, `degraded`, or `unhealthy`).
-- `system` and resource identity (`kind`, `name`, and `namespace`).
-- `findings` with `code`, `severity`, `summary`, `evidence`, and `recommendation`.
-
-Current PostgreSQL diagnostic rules cover:
-
-- Failed health check -> error (`database_health_check_failed`), making the overall status `unhealthy`.
-- No public tables -> warning (`no_public_tables`), making the overall status `degraded` when there are no errors.
-- Errors take priority over warnings for overall status.
-- No findings makes the overall status `healthy`.
-
-Current Kubernetes diagnostic rules cover:
-
-- Pod not running.
-- Pod not ready.
-- Container restarts.
-- Image pull failures, including `ImagePullBackOff` and `ErrImagePull`.
-- `CrashLoopBackOff`.
-- Generic Kubernetes Warning events.
-
-Multiple image-pull observations are correlated into one `image_pull_failure` finding with aggregated evidence.
-
-Current Docker diagnostic rules cover:
-
-- Container not running -> warning (`container_not_running`).
-- Non-zero exit code -> error (`container_nonzero_exit`).
-- Docker health unhealthy -> error.
-- Docker health starting -> warning.
-- Any error makes the overall status `unhealthy`.
-- Warnings without errors make the overall status `degraded`.
-- No findings makes the overall status `healthy`.
-
-The architecture separates responsibilities: `clients/` collect infrastructure observations; per-system diagnostics in `diagnostics/` normalize and interpret those observations; `CorrelationDiagnostics` consumes normalized diagnostic results; and MCP diagnostic tools in `tools/` orchestrate these components. The diagnostic engine is deterministic; an LLM is not required inside OpsPilot. An external AI/MCP client can reason over the structured diagnostic results.
-
-The current cross-system correlation rule emits `possible_database_dependency_failure` when both Kubernetes and PostgreSQL diagnoses are `unhealthy`, making the cross-system result `unhealthy`. Otherwise, the correlation result is `healthy` with no findings. This is correlation, not proven causation: OpsPilot intentionally reports a "possible" dependency failure because simultaneous failures do not establish that PostgreSQL caused the application failure.
-
-Verification completed:
-
-- 197 tests passed in the full automated suite.
-- MCP discovery verified 17 tools.
-- Real healthy-path MCP verification of `diagnose_cross_system_issues` returned `status=healthy`, `system=cross-system`, and `findings=[]`.
-- Controlled positive verification using synthetic normalized diagnostic input returned `status=unhealthy` with `possible_database_dependency_failure`. This was controlled/synthetic input, not a real PostgreSQL outage.
-- Real MCP integration of `diagnose_postgres_issues` was verified against the running PostgreSQL 17 container. The structured result returned `status: healthy`, `system: postgresql`, resource `kind: Database`, and `findings: []`.
-- Real end-to-end verification against the local kind cluster succeeded through the full path: MCP Client -> OpsPilot MCP Server -> `diagnose_kubernetes_issues` -> `KubernetesClient` -> real Kubernetes Pod/Events -> `KubernetesDiagnostics` -> structured MCP response.
-- A deliberately broken test Pod used `nginx:this-tag-does-not-exist` and reached `ImagePullBackOff`.
-- The resulting MCP diagnosis correctly returned status `unhealthy` and an `image_pull_failure` finding.
-- The broken test Pod was deleted after verification.
-- The normal `opspilot-demo` workload remains healthy with two running replicas.
-- Real Docker end-to-end verification used a deliberately failed Alpine container that exited with code 7. The MCP client discovered 15 tools, and `diagnose_docker_issues` returned an `unhealthy` structured result with `container_not_running` and `container_nonzero_exit` findings.
-- The temporary diagnostic container was removed afterward.
-
-Milestone 5 cross-system diagnostics is complete. Milestone 6 Security & Production Hardening remains planned as the next milestone.
-
-## Roadmap
-
-| Milestone | Scope | Status |
+| Tool | Parameters | Operation |
 | --- | --- | --- |
-| 1 | PostgreSQL client | Complete |
-| 2 | MCP server and PostgreSQL MCP tools | Complete |
-| 3 | Docker inspection tools | Complete |
-| 4 | Kubernetes inspection tools | Complete |
-| 5 | Cross-system diagnostics | Complete |
-| 6 | Security and production hardening | Planned |
+| `postgres_health` | None | Check connectivity using `SELECT 1` |
+| `postgres_list_tables` | None | List public-schema base tables |
+| `postgres_query` | `query` | Execute one SELECT in a read-only transaction; return named rows |
+| `docker_health` | None | Check Docker Engine connectivity |
+| `docker_list_containers` | None | List running and stopped container summaries |
+| `docker_inspect_container` | `name_or_id` | Return curated container state, health, exit code, and ports |
+| `docker_container_logs` | `name_or_id`, `tail=100` | Retrieve bounded recent logs |
+| `kubernetes_health` | None | Check core Kubernetes API discovery |
+| `kubernetes_list_namespaces` | None | List namespace names |
+| `kubernetes_list_pods` | `namespace=None` | List pods in one namespace or all namespaces |
+| `kubernetes_inspect_pod` | `name`, `namespace="default"` | Inspect a pod's operational state |
+| `kubernetes_pod_logs` | `name`, `namespace="default"`, `tail=100` | Retrieve bounded recent pod logs |
+| `kubernetes_list_events` | `namespace=None` | List curated events in one namespace or all namespaces |
+| `diagnose_postgres_issues` | None | Diagnose database health and public-table observations |
+| `diagnose_docker_issues` | `name_or_id` | Diagnose one container |
+| `diagnose_kubernetes_issues` | `name`, `namespace="default"` | Diagnose one pod and related events |
+| `diagnose_cross_system_issues` | `name`, `namespace="default"` | Correlate that pod's diagnosis with PostgreSQL's diagnosis |
 
-## Current Project Structure
+Log `tail` must be an integer from 1 to 1,000. Docker identifiers must be bare container names or IDs. Kubernetes log retrieval currently has no explicit container parameter; multi-container pods may require explicit selection support in future work.
 
-```text
-opspilot-mcp/
-├── README.md
-├── pyproject.toml
-├── compose.yaml
-├── .env.example
-├── .gitignore
-├── src/
-│   └── opspilot/
-│       ├── __init__.py
-│       ├── server.py                 # Implemented MCP server
-│       ├── clients/
-│       │   ├── __init__.py
-│       │   ├── postgres.py           # Implemented PostgreSQL client
-│       │   ├── docker.py             # Implemented Docker client
-│       │   └── kubernetes.py         # Implemented read-only Kubernetes client
-│       ├── diagnostics/
-│       │   ├── __init__.py
-│       │   ├── postgres.py           # Deterministic PostgreSQL diagnostic engine
-│       │   ├── docker.py             # Deterministic Docker diagnostic engine
-│       │   ├── kubernetes.py         # Deterministic Kubernetes diagnostic engine
-│       │   └── correlation.py        # Cross-system diagnostic correlation
-│       └── tools/
-│           ├── __init__.py
-│           ├── postgres.py           # Implemented PostgreSQL MCP tools
-│           ├── docker.py             # Implemented read-only Docker MCP tools
-│           ├── kubernetes.py         # Implemented read-only Kubernetes MCP tools
-│           └── diagnostics.py        # Implemented per-system and cross-system diagnostic MCP tools
-└── tests/
-    ├── __init__.py
-    ├── test_postgres.py
-    ├── test_docker.py                # DockerClient unit tests
-    ├── test_kubernetes.py            # KubernetesClient unit tests
-    ├── test_mcp.py                   # PostgreSQL, Docker, and Kubernetes MCP tool tests
-    ├── test_diagnostic_tools.py      # Diagnostic MCP tool tests
-    ├── test_postgres_diagnostics.py  # PostgreSQL diagnostic engine tests
-    ├── test_docker_diagnostics.py    # Docker diagnostic engine tests
-    ├── test_kubernetes_diagnostics.py # Kubernetes diagnostic engine tests
-    └── test_correlation_diagnostics.py # Cross-system correlation tests
-```
+## Local setup
 
-## Local Development
+Run commands from the repository root. Prerequisites:
 
-Requirements: Python 3.11+ and Docker with Docker Compose. Kubernetes inspection also requires access to a cluster through kubeconfig; the client uses the current context. Local Kubernetes verification used kind with a cluster named `opspilot` and context `kind-opspilot`.
-
-From the repository root:
+- Python 3.11+ with virtual environment support.
+- Docker Engine or Docker Desktop, Docker Compose, and permission to access the intended daemon.
+- For Kubernetes: `kubectl`, a reachable cluster, and administrator credentials for provisioning. The local guide uses kind with cluster `opspilot` and administrator context `kind-opspilot`; install kind if creating that environment.
+- Administrator PostgreSQL access for provisioning, kept separate from runtime reader access.
 
 ```bash
 python3 -m venv .venv
@@ -258,53 +71,190 @@ python -m pip install -e '.[dev]'
 cp .env.example .env
 ```
 
-Edit `.env` to set your local PostgreSQL credentials before starting the database:
+Edit the ignored `.env` locally. Supply `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_ADMIN_USER`, `POSTGRES_ADMIN_PASSWORD`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`. Use `opspilot_reader` for `POSTGRES_USER` and a distinct administrator identity. Set credentials privately; do not commit or paste them into demo output. Exported variables take precedence over dotenv values.
+
+### PostgreSQL reader provisioning
 
 ```bash
 docker compose up -d
+# Wait for the database to become healthy before provisioning.
+docker compose ps
+sh scripts/provision-postgres-reader.sh
+```
+
+Compose runs PostgreSQL 17 in `opspilot-postgres` with a persistent named volume. Its administrator fields initialize the database; changing `.env` does not reset credentials in an existing database volume.
+
+The provisioning script uses admin credentials to create/configure `opspilot_reader` as a login without superuser, database creation, role creation, replication, or RLS bypass attributes. It grants:
+
+- CONNECT to the configured database.
+- USAGE on schema `public`.
+- SELECT on current tables in `public`.
+- Default SELECT grants for future tables in `public` created by the configured `POSTGRES_ADMIN_USER` role.
+
+Tables created by other owners need corresponding default privileges or explicit grants. Provisioning does **not** perform a comprehensive privilege reset: existing memberships, ownership, other grants, PUBLIC privileges, functions, and RLS behavior require deployment review.
+
+Runtime uses `POSTGRES_USER=opspilot_reader` and its password. Admin credentials are provisioning-only (also used by Compose to initialize the development database); runtime connections never fall back to admin fields. Keep admin credentials out of the runtime launch environment and runtime dotenv configuration. A shared `.env` can still expose them to the process even though they are not used for runtime connections. Preserve them separately for later provisioning.
+
+The application also validates a single SELECT statement and uses read-only transactions. **PostgreSQL is the actual authorization boundary**; SQL screening is an additional application control, not a substitute for effective database privileges.
+
+A fresh Compose database may contain no public application tables. Table discovery can then return an empty list and PostgreSQL diagnosis can report `degraded` with `no_public_tables`; a healthy database diagnosis in the recorded demo reflects its existing tables.
+
+### Kubernetes reader provisioning: ordering matters
+
+If needed, create the local cluster:
+
+```bash
+kind create cluster --name opspilot
+```
+
+Provision using the administrator configuration, before selecting the reader for runtime. In particular, an exported reader `KUBECONFIG` does not contain the administrator context.
+
+```bash
+unset KUBECONFIG
+kubectl config use-context kind-opspilot
+kubectl config current-context
+# Confirm the output is kind-opspilot before continuing.
+kubectl --context kind-opspilot get namespaces
+sh scripts/provision-kubernetes-reader.sh --admin-context kind-opspilot
+python scripts/verify-kubernetes-reader.py \
+  --kubeconfig "$PWD/.local/kubernetes/opspilot-reader.kubeconfig"
+# Only after successful verification, select the reader for OpsPilot runtime.
+export KUBECONFIG="$PWD/.local/kubernetes/opspilot-reader.kubeconfig"
+```
+
+The script applies [the RBAC manifest](kubernetes/opspilot-reader-rbac.yaml): a dedicated `opspilot-reader` ServiceAccount in `opspilot-system`, ClusterRole, and ClusterRoleBinding. Its observation permissions are list namespaces; get/list pods; get pod logs; list events; and get `/api/v1`. It grants no Secret access, workload mutation, exec, attach, or port-forward permissions. Additional bindings can expand effective authority, so run the verifier against the real cluster. The verifier uses identity/access reviews and six observational read paths; it relies on the cluster's review permissions.
+
+The generated standalone, token-only kubeconfig is `.local/kubernetes/opspilot-reader.kubeconfig`. Git ignores `.local/kubernetes/`; provisioning sets directory/file modes to **0700/0600** and atomically replaces the file. Protect parent directories and the local account as well.
+
+Credentials are short-lived: provisioning requests a one-hour token, with actual lifetime controlled by the API server. There is currently **no automatic token renewal**. To renew, repeat the administrator-first sequence above, verify the new reader, then relaunch OpsPilot with the generated kubeconfig. An expired reader token can produce **HTTP 401 (authentication failure)**; do not confuse it with an RBAC authorization denial, typically HTTP 403.
+
+The runtime validates static kubeconfig credentials and HTTPS configuration; executable credential plugins and auth-provider plugins are unsupported. Configuration validation does not attest effective identity or RBAC.
+
+### Docker access
+
+Ensure the local account can reach the intended daemon. OpsPilot resolves Docker environment/context settings, including `DOCKER_HOST`, `DOCKER_CONTEXT`, and applicable TLS settings. Review the selected endpoint and local socket permissions.
+
+OpsPilot exposes observational Docker operations only and no mutation tools. **Access to an unrestricted Docker daemon/socket is not daemon-enforced read-only access.** Compromised code in the process could use daemon authority directly, potentially reaching host-level authority. Trusted local deployment remains part of the security boundary.
+
+## Start with an MCP client
+
+Canonical startup, with the virtual environment active:
+
+```bash
+python -m opspilot.server
+```
+
+This is an MCP stdio process, normally launched and managed by an MCP client. For client configuration, use the absolute virtualenv Python executable so interpreter selection does not depend on shell activation:
+
+```json
+{
+  "mcpServers": {
+    "opspilot": {
+      "command": "/absolute/path/opspilot-mcp/.venv/bin/python",
+      "args": ["-m", "opspilot.server"]
+    }
+  }
+}
+```
+
+Replace the path with your checkout's absolute path. Configure the client's working directory as the repository root and provide its runtime PostgreSQL configuration and generated reader `KUBECONFIG` through the client's supported environment mechanism. GUI clients may not inherit your terminal's environment. Client configuration formats vary; the executable and arguments above are the required launch values.
+
+Supported module startup explicitly selects stdio. There is no supported remote HTTP deployment. Stdio does not authenticate callers or provide per-user authorization; the local launcher and MCP client must be trusted.
+
+## Diagnostic semantics
+
+Diagnostics return `status`, `system`, resource identity, and `findings`. Findings contain `code`, `severity`, `summary`, `evidence`, and `recommendation`. Rules are deterministic for the same supplied observations:
+
+- `healthy`: no implemented finding rule fired.
+- `degraded`: warnings exist without errors.
+- `unhealthy`: at least one error finding exists.
+
+PostgreSQL rules cover failed health checks and absence of public tables. Docker rules cover non-running containers, nonzero exit codes, and unhealthy/starting health state. Kubernetes rules cover pod phase/readiness, restarts, image pull failures, crash loops, and Warning events; related image-pull evidence is aggregated.
+
+Cross-system correlation currently covers **Kubernetes + PostgreSQL**. When both child diagnoses are `unhealthy`, it emits `possible_database_dependency_failure`. Otherwise, the current rule returns `healthy` with no findings. **A healthy cross-system result only means no implemented correlation rule fired; it does not certify every child system healthy.** Correlation is not causation and does not prove that the pod depends on PostgreSQL.
+
+Backend/connectivity exceptions may propagate as tool failures rather than becoming diagnostic findings. A health response, a diagnostic status, and successful tool execution are distinct signals; audit success does not assert infrastructure health.
+
+## Security hardening and boundary
+
+See the maintained [threat model](docs/threat-model.md) for assumptions, mechanisms, evidence, and residual risks.
+
+Implemented controls include:
+
+- Centralized post-conversion secret redaction for registered tool publication, with recognized credential forms and registered secret values; curated infrastructure projections reduce exposed fields.
+- Lazy, validated runtime configuration before backend activation, no PostgreSQL admin fallback, and a static Kubernetes configuration snapshot.
+- Native backend timeouts, PostgreSQL streamed rows, bounded listings/pagination, log retrieval, values, observations, and diagnostic evidence.
+- Best-effort metadata-only audit events with tool/outcome/failure category and correlation metadata; SQL, observations, and exception text are excluded.
+- Startup hardening that installs owned redacting stderr and audit handlers idempotently. Import/tool discovery does not activate infrastructure or install owned runtime logging.
+- Explicit stdio selection on canonical module startup.
+
+Current policy includes 500 query rows/list items, log tails up to 1,000 lines, 256 KiB log payloads, and a 1 MiB logical observation budget. PostgreSQL uses a 5-second connection timeout and 10-second statement timeout; Docker uses a 10-second native request timeout; Kubernetes uses 5/10-second connect/read timeouts. These are practical retrieval/output policies, not hard total deadlines, process-memory limits, or serialized MCP wire-size ceilings. SDKs may buffer data before checks.
+
+Redaction does not identify arbitrary sensitive business data or every unknown secret. Direct stderr writes, independent handlers, pre-runtime failures, and some SDK/protocol paths remain outside comprehensive protection. Audit delivery can fail or be lost on abrupt termination, and stderr can block. Local credentials, dependencies, administrators, backends, and the launcher remain trusted. Runtime validation does not prove live PostgreSQL privileges or Kubernetes RBAC.
+
+## Verification and local demo
+
+### Recorded evidence
+
+The previous completed security slice reported **751 automated tests passed**. This is regression evidence for application behavior; it does **not** prove live infrastructure authorization. These tests and the following live checks were completed before this README update; the documentation task does not claim a fresh run.
+
+Separately completed live verification supplied for Milestone 6, Slice 10:
+
+| Area | Observed result |
+| --- | --- |
+| PostgreSQL reader | Health, table discovery, and SELECT succeeded; database-enforced INSERT, UPDATE, DELETE, and DROP attempts were denied with SQLSTATE `42501` |
+| Kubernetes reader | Provisioning/verifier passed 97 authorization checks and six live read checks; `create deployments.apps` was denied |
+| Docker | Observational calls succeeded; bounded Docker log retrieval was demonstrated |
+| MCP discovery | Canonical stdio startup discovered all 17 tools: expected 17, discovered 17, missing 0, unexpected 0 |
+| MCP invocation | Representative PostgreSQL, Docker, Kubernetes, and diagnostic tools succeeded; bounded Kubernetes logs were demonstrated |
+| SQL application rejection | MCP `postgres_query` accepted `SELECT 1`; a DELETE was rejected by the application before database execution |
+| Failure handling | The MCP-facing failure was generic; the underlying SDK emitted an internal traceback to stderr. The audit event contained metadata/failure category without the SQL query |
+| Live diagnoses | A real exited Docker container produced `degraded` with `container_not_running`; PostgreSQL and Kubernetes diagnoses were healthy; cross-system correlation returned healthy with no findings |
+
+A **separate synthetic deterministic test** supplied unhealthy Kubernetes and PostgreSQL diagnoses and produced `possible_database_dependency_failure`. This was synthetic correlation input: **no infrastructure was intentionally broken** for this verification. The healthy live correlation and synthetic positive case demonstrate different paths; neither establishes a real database-caused pod failure.
+
+### Reproduce a local walkthrough
+
+After setup and reader verification, launch OpsPilot from your MCP client with the canonical executable/arguments above:
+
+1. Request tool discovery and compare the names with the 17-tool table.
+2. Call `postgres_health`, `postgres_list_tables`, and `postgres_query` with `{"query":"SELECT 1"}`.
+3. Call `docker_health` and `docker_list_containers`; choose an existing container's name/ID for inspection, `docker_container_logs` with `tail=20`, and `diagnose_docker_issues`.
+4. Call `kubernetes_health`, `kubernetes_list_namespaces`, and `kubernetes_list_pods`. Choose an existing pod and its namespace for inspection, `kubernetes_pod_logs` with `tail=20`, and `kubernetes_list_events` for that namespace.
+5. Call `diagnose_postgres_issues`, `diagnose_kubernetes_issues`, and `diagnose_cross_system_issues` for the selected pod. Interpret the results using the semantics above; cluster contents and database tables affect findings.
+6. To demonstrate application SQL validation, pass `{"query":"DELETE FROM opspilot_demo_validation_only"}` to `postgres_query`. It should be rejected before execution and does not require that table to exist. This checks application rejection, not database authorization.
+
+Run the existing offline regression suite separately:
+
+```bash
 python -m pytest -v
 ```
 
-Docker Compose starts a PostgreSQL 17 container named `opspilot-postgres`. The client reads `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, and `POSTGRES_PASSWORD` from the environment or `.env`; existing environment variables take precedence.
+For effective authorization evidence, use the Kubernetes verifier and separately review/test the deployed PostgreSQL reader's effective privileges. Do not infer database-enforced denial from an application-rejected DELETE or infer live RBAC from mocked tests. The recorded 751-test count and live results above are historical evidence, not promised output for every local environment.
 
-### Local MCP Usage
+## Repository guide
 
-With the virtual environment active, start the MCP server from the repository root:
-
-```bash
-mcp run src/opspilot/server.py:mcp --transport stdio
-```
-
-The server communicates with an MCP client over standard input and output and exposes the 17 inspection and diagnostic tools listed above. Direct stdio server/client communication, manual MCP-to-Docker communication, and real end-to-end MCP -> OpsPilot -> Kubernetes calls for all six Kubernetes tools have been verified.
-
-## Technology Stack
-
-| Technology | Role |
+| Path | Purpose |
 | --- | --- |
-| Python | Server and infrastructure client implementation |
-| MCP | Implemented server protocol exposing PostgreSQL, Docker, and Kubernetes tools to AI assistants |
-| PostgreSQL | First supported infrastructure service |
-| Psycopg 3 | Synchronous PostgreSQL connectivity |
-| Docker | Development database container and implemented read-only inspection integration |
-| Docker SDK for Python | Docker API client |
-| Docker Compose | Local PostgreSQL development environment |
-| Kubernetes | Implemented read-only cluster inspection integration |
-| Kubernetes Python client | Kubernetes API access using kubeconfig/current context |
-| kind | Local Kubernetes integration verification |
-| pytest | Automated PostgreSQL, Docker, Kubernetes, and MCP tool tests |
+| `src/opspilot/server.py` | MCP registration and canonical stdio startup |
+| `src/opspilot/tools/` | PostgreSQL, Docker, Kubernetes, and diagnostic tools |
+| `src/opspilot/clients/` | Backend observation clients |
+| `src/opspilot/diagnostics/` | Deterministic per-system rules and correlation |
+| `src/opspilot/configuration.py` | Validated backend settings |
+| `src/opspilot/redaction.py`, `audit.py`, `limits.py` | Publication, audit, and observation policies |
+| `scripts/` | Reader provisioning and Kubernetes live verification |
+| `kubernetes/opspilot-reader-rbac.yaml` | Narrow reader RBAC policy |
+| `compose.yaml`, `.env.example` | Local database setup and configuration template |
+| `tests/` | Automated regression coverage |
+| `docs/threat-model.md` | Security model and residual risks |
 
-## Security
+## Limitations and future work
 
-`execute_select()` validates that input contains exactly one SELECT statement, rejecting non-SELECT queries and multiple statements before connecting. It then executes the query inside a PostgreSQL read-only transaction. `list_tables()` uses this same protected query path.
-
-These protections limit database writes but are not a complete security boundary. Stronger database roles and permissions, including a dedicated least-privilege read-only role, will be added later as part of security and production hardening.
-
-Local credentials belong in `.env`, which is excluded from Git. Keep `.env.example` limited to example values and never commit real credentials.
-
-## Development Approach
-
-```text
-understand -> implement -> test -> verify -> commit -> next milestone
-```
-
-Each milestone starts with understanding the requirements, followed by implementation, automated tests, and verification against the relevant infrastructure before committing. Update this README as milestones and verification results change.
+- Remote authentication/HTTP transport, transport security policy, and per-user/per-resource authorization remain future work. Inherited SDK transport capabilities do not make remote hosting supported.
+- Stronger Docker isolation or an allowlisted authorization proxy is needed to restrict daemon authority independently of application tools.
+- Durable, tamper-evident audit storage, stronger delivery guarantees, and authenticated attribution are not implemented.
+- Rate/concurrency controls, aggregate-load limits, hard total deadlines, memory ceilings, and serialized wire-size ceilings remain open.
+- Broader sensitive-data detection and dependency/observation provenance require further work; deterministic findings do not validate the truth or origin of backend evidence.
+- Kubernetes token renewal is manual. Explicit container selection is needed where pod log/diagnostic behavior depends on a particular container.
+- Richer dependency mapping and diagnostics, including Docker cross-system correlation, remain future work.
+- Backend failures need more normalized diagnostic handling. Cleanup errors can currently mask an original operation failure and affect diagnosis/audit classification; cleanup error precedence remains unresolved.
