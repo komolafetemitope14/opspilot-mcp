@@ -389,6 +389,7 @@ def test_fresh_server_import_and_discovery_without_backend_activation():
         import psycopg
         from kubernetes import client as kube_client, config as kube_config
         from mcp import Client
+        from mcp.server import MCPServer
 
         forbidden = MagicMock(side_effect=AssertionError("Discovery activated a backend"))
         original_socket = socket.socket
@@ -404,6 +405,9 @@ def test_fresh_server_import_and_discovery_without_backend_activation():
         for name in ("connect", "connect_ex", "bind", "listen", "sendto"):
             setattr(OfflineSocket, name, forbidden)
         subprocess.Popen = forbidden
+        for name in ("run", "run_stdio_async", "run_sse_async", "run_streamable_http_async",
+                     "sse_app", "streamable_http_app"):
+            setattr(MCPServer, name, forbidden)
         psycopg.connect = forbidden
         docker.DockerClient = docker.APIClient = docker.from_env = forbidden
         kube_client.Configuration = kube_client.ApiClient = kube_client.CoreV1Api = forbidden
@@ -428,6 +432,72 @@ def test_fresh_server_import_and_discovery_without_backend_activation():
     ''')
     result = subprocess.run([sys.executable, "-c", script], capture_output=True,
                             text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("spoof_transport_environment", [False, True])
+def test_supported_module_startup_is_stdio_only(spoof_transport_environment):
+    import os
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent('''
+        import runpy
+        import socket
+        import subprocess
+        from unittest.mock import MagicMock
+        import docker
+        import psycopg
+        from kubernetes import client as kube_client, config as kube_config
+        from mcp.server import MCPServer
+
+        forbidden = MagicMock(side_effect=AssertionError("Startup activated transport or infrastructure"))
+        for name in ("bind", "listen", "connect", "connect_ex", "sendto"):
+            setattr(socket.socket, name, forbidden)
+        socket.getaddrinfo = socket.create_connection = forbidden
+        subprocess.Popen = forbidden
+        psycopg.connect = forbidden
+        docker.DockerClient = docker.APIClient = docker.from_env = forbidden
+        kube_client.Configuration = kube_client.ApiClient = kube_client.CoreV1Api = forbidden
+        kube_config.load_kube_config = kube_config.load_kube_config_from_dict = forbidden
+        for name in ("run", "run_stdio_async", "run_sse_async",
+                     "run_streamable_http_async", "sse_app", "streamable_http_app"):
+            setattr(MCPServer, name, forbidden)
+
+        from opspilot import configuration
+        configuration.load_postgres_config = forbidden
+        configuration.load_docker_settings = forbidden
+        configuration.load_kubernetes_settings = forbidden
+        configuration.find_dotenv = configuration._read = forbidden
+        from opspilot.audit import AuditedMCPServer
+        from opspilot.tools import postgres, docker, kubernetes, diagnostics
+        for module in (postgres, docker, kubernetes, diagnostics):
+            for name in ("PostgresClient", "DockerClient", "KubernetesClient"):
+                if hasattr(module, name):
+                    setattr(module, name, forbidden)
+
+        # Only the supported module entry point is constrained here. An operator
+        # can deliberately host the exported SDK object using another transport.
+        calls = []
+        def intercepted_run(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            assert args == ()
+            assert kwargs == {"transport": "stdio"}
+        AuditedMCPServer.run = intercepted_run
+        runpy.run_module("opspilot.server", run_name="__main__")
+        assert calls == [((), {"transport": "stdio"})]
+        forbidden.assert_not_called()
+    ''')
+    env = dict(os.environ)
+    if spoof_transport_environment:
+        # These are arbitrary inputs, not supported OpsPilot configuration.
+        # MCP 2.3.0 has no server transport-selection environment setting.
+        env.update(OPSPILOT_TRANSPORT="streamable-http", OPSPILOT_BIND_HOST="0.0.0.0",
+                   OPSPILOT_PORT="8000", OPSPILOT_AUTH_MODE="none")
+    result = subprocess.run([sys.executable, "-B", "-c", script], env=env,
+                            capture_output=True, text=True, timeout=30,
+                            cwd=Path(__file__).resolve().parents[1])
     assert result.returncode == 0, result.stdout + result.stderr
 
 

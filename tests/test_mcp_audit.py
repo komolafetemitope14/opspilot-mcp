@@ -228,6 +228,52 @@ def test_stdio_audit_stderr_only():
     assert "backend forbidden" not in stderr
 
 
+@pytest.mark.parametrize("identity_source", ["none", "request_metadata", "client_info"])
+def test_stdio_audit_has_no_authenticated_caller_identity(identity_source):
+    messages = handshake()
+    params = {"name": "docker_health", "arguments": {}}
+    spoofed = {
+        "subject": "spoofed-admin", "principal": "spoofed-root",
+        "client_id": "spoofed-trusted-client", "scopes": ["spoofed-admin-scope"],
+    }
+    if identity_source == "request_metadata":
+        # _meta is the protocol's extensible, caller-controlled metadata map.
+        params["_meta"] = spoofed
+    elif identity_source == "client_info":
+        messages[0]["params"]["clientInfo"] = {
+            "name": "spoofed-client-principal", "version": "spoofed-client-version",
+        }
+    messages += [
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        {"jsonrpc": "2.0", "id": "caller-correlation-only", "method": "tools/call", "params": params},
+    ]
+    responses, trailing, stderr, code = asyncio.run(stdio_exchange(stdio_server_script(1), messages))
+    assert code == 0 and trailing == b""
+    assert [response["id"] for response in responses] == [1, 2, "caller-correlation-only"]
+    assert "error" not in responses[0] and "protocolVersion" in responses[0]["result"]
+    assert len(responses[1]["result"]["tools"]) == 17
+    result = responses[2]["result"]
+    assert not result.get("isError", False)
+    assert result["structuredContent"] == {"result": False}
+    assert result["content"] == [{"type": "text", "text": "false"}]
+    lines = [line for line in stderr.splitlines() if line.startswith('{')]
+    assert len(lines) == 1
+    event = json.loads(lines[0])
+    # Assert the final emitted schema, not just the metadata-building helper.
+    assert set(event) == {
+        "schema_version", "timestamp", "event", "invocation_id", "request_id",
+        "tool", "backend", "action", "resource_type", "outcome", "duration_ms",
+    }
+    assert not set(event) & {
+        "user", "username", "subject", "principal", "client_id", "issuer",
+        "authenticated", "auth", "access_token", "token", "scopes",
+    }
+    assert event["request_id"] == "caller-correlation-only"
+    assert event["invocation_id"] != event["request_id"]
+    assert event["tool"] == "docker_health" and event["outcome"] == "success"
+    assert "spoofed-" not in lines[0]
+
+
 @pytest.mark.parametrize("state", [123, "private-unknown-request-state-token"])
 def test_request_state_rejections_are_audited(state):
     messages = handshake() + [
